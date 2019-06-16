@@ -1,14 +1,15 @@
-global count_watermark, count_actual
+global count_actual = 0
+global count_trace = 0
 
-probe kernel.function("*@mm/page_alloc.c:3234") {
-	count_watermark++;
-}
-
-probe kernel.function("*@mm/page_alloc.c:4103") {
+probe kernel.function("wake_all_kswapds") {
 	count_actual++;
 }
 
-probe end {
-	printf("Kswapd woken up due to watermark boosting %d\n",count_watermark)	printf("Kswapd woken up due to memory pressure %d\n",count_actual);
+probe kernel.trace("mm_vmscan_kswapd_wake") {
+	count_trace++;
+}
 
+probe end {
+	printf("Kswapd woken up due to memory pressure %d\n",count_actual);
+	printf("Kswapd woken up %d\n", count_trace);
 }
