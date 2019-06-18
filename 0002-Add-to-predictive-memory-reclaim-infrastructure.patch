@@ -1,0 +1,252 @@
+From 6f4a2777e0edf5ffe48ea1801eda263341e04bb5 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Tue, 18 Jun 2019 23:06:11 +0530
+Subject: [PATCH 2/2] Add to predictive memory reclaim infrastructure
+
+---
+ include/linux/lsq.h    |  15 +++---
+ include/linux/mmzone.h |   3 +-
+ mm/Makefile            |   2 +-
+ mm/lsq.c               | 124 +++++++++++++++++++++++++++++++++++++++++++++++++
+ mm/page_alloc.c        |  13 ++----
+ 5 files changed, 139 insertions(+), 18 deletions(-)
+ create mode 100644 mm/lsq.c
+
+diff --git a/include/linux/lsq.h b/include/linux/lsq.h
+index 7179d63..9316c9a 100644
+--- a/include/linux/lsq.h
++++ b/include/linux/lsq.h
+@@ -1,6 +1,8 @@
+-#include <linux/mmzone.h>
++#ifndef LSQ_H
++#define LSQ_H
+ 
+-#define COUNT 8
++#define COUNT_ORDER 3
++#define COUNT (1<<COUNT_ORDER)
+ 
+ struct lsq_struct {
+ 	int slot; 
+@@ -20,8 +22,7 @@ struct prediction_struct {
+ 	unsigned long f_e;
+ };
+ 
+-struct prediction_struct *
+-predict(unsigned long *frag_vec, struct lsq_struct *lsq, int compaction_rate, int fragmentation_threshold) 
+-{
+-	return 0xdeadbeef; 
+-}	
++extern struct prediction_struct *
++predict(unsigned long *frag_vec, struct lsq_struct *lsq);	
++
++#endif
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 97dd42c..4ca3eec 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -18,6 +18,7 @@
+ #include <linux/pageblock-flags.h>
+ #include <linux/page-flags-layout.h>
+ #include <linux/atomic.h>
++#include <linux/lsq.h>
+ #include <asm/page.h>
+ 
+ /* Free memory management - zoned buddy allocator.  */
+@@ -502,7 +503,7 @@ struct zone {
+ 
+ 	bool			contiguous;
+ 
+-	struct lsq_struct *lsq;
++	struct lsq_struct	lsq[MAX_ORDER];
+ 
+ 	ZONE_PADDING(_pad3_)
+ 	/* Zone statistics */
+diff --git a/mm/Makefile b/mm/Makefile
+index d210cc9..bf4f48b 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -25,7 +25,7 @@ mmu-y			:= nommu.o
+ mmu-$(CONFIG_MMU)	:= gup.o highmem.o memory.o mincore.o \
+ 			   mlock.o mmap.o mmu_gather.o mprotect.o mremap.o \
+ 			   msync.o page_vma_mapped.o pagewalk.o \
+-			   pgtable-generic.o rmap.o vmalloc.o
++			   pgtable-generic.o rmap.o vmalloc.o lsq.o
+ 
+ 
+ ifdef CONFIG_CROSS_MEMORY_ATTACH
+diff --git a/mm/lsq.c b/mm/lsq.c
+new file mode 100644
+index 0000000..b21161f
+--- /dev/null
++++ b/mm/lsq.c
+@@ -0,0 +1,124 @@
++/*
++ * Least squares implementation
++ */
++
++#include <linux/mmzone.h>
++#include <linux/lsq.h>
++#include <asm/div64.h>
++
++unsigned long R_c = 2500;
++unsigned long threshold = 10; 
++
++unsigned long SUM_X = (COUNT - (1<<2*COUNT_ORDER))>>1;
++unsigned long SUM_XX = (2*(1<<3*COUNT_ORDER) - 3*(1<<2*COUNT_ORDER) + 1);
++
++static int
++lsq_fit(struct lsq_struct *lsq, unsigned long new_y, unsigned long *m, unsigned long *c)
++{
++	unsigned long oldest_y;
++	unsigned long temp1, temp2;
++
++	oldest_y = lsq->y[lsq->slot];
++
++	lsq->sum_xy -= lsq->sum_y;
++	if (lsq->ready)
++		lsq->sum_xy += COUNT * oldest_y;
++
++	lsq->sum_y += new_y;
++	if (lsq->ready)
++		lsq->sum_y -= oldest_y; 
++
++	lsq->y[lsq->slot++] = new_y; 
++
++	if (lsq->slot == COUNT) {
++		lsq->slot = 0;
++		lsq->ready = 1;
++	}
++
++	if (!lsq->ready) 
++		return -1; 
++
++	do_div(SUM_XX,6);
++
++	temp1 = (COUNT * lsq->sum_xy - SUM_X * lsq->sum_y);
++	temp2 = (COUNT * SUM_XX - SUM_X * SUM_X);
++
++	do_div(temp1,temp2);
++
++	*m = temp1; 
++
++	temp1 = (lsq->sum_y - *m * SUM_X);
++	
++	do_div(temp1, COUNT);
++
++	*c = temp1; 
++
++	return 0;
++}
++
++struct prediction_struct *
++predict(unsigned long *frag_vec, struct lsq_struct *lsq)
++{
++	struct prediction_struct *p;
++	int order;
++	unsigned long m[MAX_ORDER];
++	unsigned long c[MAX_ORDER];
++	int is_ready = 1;
++
++	for(order = 0; order < MAX_ORDER; order++) {
++		if (lsq_fit(&lsq[order], frag_vec[order], &m[order],
++				&c[order]) == -1)
++			is_ready = 0;
++	}
++
++	if (!is_ready)
++		return NULL; 
++
++	p->f_T_zero = c[0];
++	p->R_T = m[0];
++
++	for (order = 1; order < MAX_ORDER; order++) {
++		unsigned long temp1;
++		unsigned long temp2; 
++
++		p->order = order;
++		p->f_f_zero = c[order];
++		p->R_f = m[order];
++
++		if (p->f_T_zero <= p->f_f_zero)
++			continue;
++		
++		if (p->R_T < p->R_f) {
++			temp1 = (p->f_T_zero - p->f_f_zero);
++			temp2 = (p->R_f - p->R_T);
++			do_div(temp1,temp2);
++			p->t_e = temp1; 
++			if (p->t_e < 1) {
++				temp1 = (p->f_T_zero - p->f_f_zero) * p->R_T;
++				temp2 = (p->R_f - p->R_T) + p->f_T_zero;
++				do_div(temp1,temp2);
++				p->f_e = temp1;
++				if (p->f_e > threshold) 
++					return p;
++			}
++		}
++
++		if (p->R_T < p->R_f + R_c) {
++			temp1 = (p->f_T_zero - p->f_f_zero + R_c);
++			temp2 = (p->R_f + R_c - p->R_T);
++			do_div(temp1,temp2);
++			p->t_e = temp1; 
++			if (p->t_e > 1) {
++				temp1 = (p->f_T_zero - p->f_f_zero + R_c) * p->R_T;
++				temp2 = (p->R_f + R_c - p->R_T) + p->f_T_zero;
++				do_div(temp1,temp2);
++				p->f_e = temp1;
++				if (p->f_e > threshold) 
++					return p;
++			}
++		}
++	}
++
++	return NULL;
++}
++
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 87a796e..16b19305 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -316,9 +316,6 @@ int page_group_by_mobility_disabled __read_mostly;
+  * fragmentation_threshold could be subject to change after a compaction pass
+  */
+ 
+-int compaction_rate __read_mostly = 2500;
+-int fragmentation_threshold = 0; 
+-
+ #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
+ /*
+  * During boot we initialize deferred pages on-demand, as needed, but once
+@@ -2268,13 +2265,12 @@ static inline void boost_watermark(struct zone *zone)
+ }
+ 
+ /*
+- * Iterate through all zones in the node to check if there could be 
+- * a potential fragmentation event on this particular node
++ * Check whether this zone could have bad potential external  
++ * fragmentation in the future
+  */
+ 
+ static struct prediction_struct *
+-check_for_future_ext_frags(struct zone *zone) {	
+-	struct lsq_struct *lsq = zone->lsq; 
++check_for_future_ext_frags(struct zone *zone) {	 
+ 	unsigned long frag_vec[MAX_ORDER];
+ 	int order;
+ 	unsigned long total_free_pages;
+@@ -2292,10 +2288,9 @@ check_for_future_ext_frags(struct zone *zone) {
+ 				frag_vec[order] + curr_free_pages; 
+ 		}		
+ 	}
+-
+ 	frag_vec[0] = total_free_pages; 
+ 
+-	result = predict(frag_vec, lsq, fragmentation_threshold, compaction_rate);
++	result = predict(frag_vec, zone->lsq);
+ 
+ 	return result;
+ }
+-- 
+2.7.4
+

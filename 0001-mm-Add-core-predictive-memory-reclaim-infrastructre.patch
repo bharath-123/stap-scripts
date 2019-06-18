@@ -1,0 +1,193 @@
+From 9397099ae0be445630b939ed9e150aa523d171c0 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Tue, 18 Jun 2019 14:38:57 +0530
+Subject: [PATCH 1/2] mm: Add core predictive memory reclaim infrastructre
+
+This patch defines the core structure of the predictive memory reclaim
+model.
+
+The predictive memory reclaim models aim to predict external
+fragmentation events in the future and attempts premptive compaction
+when a potential fragmentation event which could fail higher order
+allocation occurs. The model uses least squares algorithm to predict a
+potential future memory exhausation.
+
+struct lsq_struct: This is a per-zone structure which stores the least
+square values for each zone.
+
+struct prediction_struct: This stores the variables found after each
+prediction.
+
+Compaction rate and fragmentation threshold are params used in the
+algorithm. Fragmentation threshold is the amount of memory that must be
+lost to fragmentation inorder for the predictor to attempt compaction.
+
+The 'predict' function runs least squares algorithm based on the number
+of free pages in each order and returns a non-null value if preemptive compaction
+is to be done or returns a null value if preemptive compaction is not
+needed.
+
+The current implementation piggybacks off Mel Gorman's fragmentation
+avoidance patches [1]. Mel Gorman's patches boosts the watermark of the
+zone where external fragmentation event occured and manually wakes up
+kswapd to reclaim a small amount of memory and then perform compaction
+via kcompactd. The current implementation first runs through the predict
+function and based on the return value, the watermarks are boosted and
+preemptive compaction is done.
+
+This is based of v5.1
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ include/linux/lsq.h    | 27 +++++++++++++++++++++++++
+ include/linux/mmzone.h |  2 ++
+ mm/page_alloc.c        | 55 ++++++++++++++++++++++++++++++++++++++++++++++----
+ 3 files changed, 80 insertions(+), 4 deletions(-)
+ create mode 100644 include/linux/lsq.h
+
+diff --git a/include/linux/lsq.h b/include/linux/lsq.h
+new file mode 100644
+index 0000000..7179d63
+--- /dev/null
++++ b/include/linux/lsq.h
+@@ -0,0 +1,27 @@
++#include <linux/mmzone.h>
++
++#define COUNT 8
++
++struct lsq_struct {
++	int slot; 
++	int ready; 
++	unsigned long y[COUNT];
++	unsigned long sum_xy;
++	unsigned long sum_y; 
++};
++
++struct prediction_struct {
++	int order; 
++	unsigned long f_T_zero;
++	unsigned long R_T;
++	unsigned long f_f_zero; 
++	unsigned long R_f; 
++	unsigned long t_e; 
++	unsigned long f_e;
++};
++
++struct prediction_struct *
++predict(unsigned long *frag_vec, struct lsq_struct *lsq, int compaction_rate, int fragmentation_threshold) 
++{
++	return 0xdeadbeef; 
++}	
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index fba7741..97dd42c 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -502,6 +502,8 @@ struct zone {
+ 
+ 	bool			contiguous;
+ 
++	struct lsq_struct *lsq;
++
+ 	ZONE_PADDING(_pad3_)
+ 	/* Zone statistics */
+ 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index c02cff1..87a796e 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -67,6 +67,7 @@
+ #include <linux/lockdep.h>
+ #include <linux/nmi.h>
+ #include <linux/psi.h>
++#include <linux/lsq.h>
+ 
+ #include <asm/sections.h>
+ #include <asm/tlbflush.h>
+@@ -310,6 +311,14 @@ EXPORT_SYMBOL(nr_online_nodes);
+ 
+ int page_group_by_mobility_disabled __read_mostly;
+ 
++/*
++ * compaction_rate and fragmentation_threshold can be given as sysctls
++ * fragmentation_threshold could be subject to change after a compaction pass
++ */
++
++int compaction_rate __read_mostly = 2500;
++int fragmentation_threshold = 0; 
++
+ #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
+ /*
+  * During boot we initialize deferred pages on-demand, as needed, but once
+@@ -2259,6 +2268,39 @@ static inline void boost_watermark(struct zone *zone)
+ }
+ 
+ /*
++ * Iterate through all zones in the node to check if there could be 
++ * a potential fragmentation event on this particular node
++ */
++
++static struct prediction_struct *
++check_for_future_ext_frags(struct zone *zone) {	
++	struct lsq_struct *lsq = zone->lsq; 
++	unsigned long frag_vec[MAX_ORDER];
++	int order;
++	unsigned long total_free_pages;
++	unsigned long curr_free_pages; 
++	struct prediction_struct *result; 
++
++	total_free_pages = frag_vec[0] = 0;
++	for (order = 0; order < MAX_ORDER; order++) {
++		curr_free_pages = zone->free_area[order].nr_free << order;
++
++		total_free_pages += curr_free_pages; 
++
++		if (order < MAX_ORDER - 1) {
++			frag_vec[order + 1] = 
++				frag_vec[order] + curr_free_pages; 
++		}		
++	}
++
++	frag_vec[0] = total_free_pages; 
++
++	result = predict(frag_vec, lsq, fragmentation_threshold, compaction_rate);
++
++	return result;
++}
++
++/*
+  * This function implements actual steal behaviour. If order is large enough,
+  * we can steal whole pageblock. If not, we first move freepages in this
+  * pageblock to our migratetype and determine how many already-allocated pages
+@@ -2273,8 +2315,10 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
+ 	struct free_area *area;
+ 	int free_pages, movable_pages, alike_pages;
+ 	int old_block_type;
++	struct prediction_struct *prediction = NULL;
+ 
+ 	old_block_type = get_pageblock_migratetype(page);
++	prediction = check_for_future_ext_frags(zone);
+ 
+ 	/*
+ 	 * This can happen due to races and we want to prevent broken
+@@ -2293,11 +2337,14 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
+ 	 * Boost watermarks to increase reclaim pressure to reduce the
+ 	 * likelihood of future fallbacks. Wake kswapd now as the node
+ 	 * may be balanced overall and kswapd will not wake naturally.
++	 * If potential fragmentation event could occur, then boost the 
++	 * watermarks.
+ 	 */
+-	boost_watermark(zone);
+-	if (alloc_flags & ALLOC_KSWAPD)
+-		set_bit(ZONE_BOOSTED_WATERMARK, &zone->flags);
+-
++	if (prediction) { 
++		boost_watermark(zone);
++		if (alloc_flags & ALLOC_KSWAPD)
++			set_bit(ZONE_BOOSTED_WATERMARK, &zone->flags);
++	}
+ 	/* We are not allowed to try stealing from the whole block */
+ 	if (!whole_block)
+ 		goto single_page;
+-- 
+2.7.4
+

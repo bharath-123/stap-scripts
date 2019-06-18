@@ -1,0 +1,11 @@
+global stats
+
+probe kernel.statement("__rmqueue_pcplist@mm/page_alloc.c:3148") {
+	stats["pcplist", execname()] <<< 1
+}
+
+probe end {
+	foreach ([f,en] in stats) {
+		printf("pcplist refilled %d times\n", @count(stats[f,en]))
+	}
+}
