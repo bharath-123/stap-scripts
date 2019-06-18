@@ -1,0 +1,64 @@
+!_TAG_FILE_FORMAT	2	/extended format; --format=1 will not append ;" to lines/
+!_TAG_FILE_SORTED	1	/0=unsorted, 1=sorted, 2=foldcase/
+!_TAG_PROGRAM_AUTHOR	Darren Hiebert	/dhiebert@users.sourceforge.net/
+!_TAG_PROGRAM_NAME	Exuberant Ctags	//
+!_TAG_PROGRAM_URL	http://ctags.sourceforge.net	/official site/
+!_TAG_PROGRAM_VERSION	5.9~svn20110310	//
+.DEFAULT_GOAL	Makefile	/^.DEFAULT_GOAL := predictord$/;"	m
+BUDDYINFO	predictord.c	17;"	d	file:
+CC	Makefile	/^CC=cc$/;"	m
+CFLAGS	Makefile	/^CFLAGS=-I. -Wall$/;"	m
+COMPACT_PATH_FORMAT	predictord.c	16;"	d	file:
+COUNT	predict.h	9;"	d
+LDFLAGS	Makefile	/^LDFLAGS=-lpthread$/;"	m
+MAX_ORDER	predict.h	8;"	d
+MAX_OUTPUT	predictord.c	/^	MAX_OUTPUT$/;"	e	enum:output_type	file:
+OBJS	Makefile	/^OBJS=predict.o predictord.o$/;"	m
+OUTPUT_OBSERVATIONS	predictord.c	/^	OUTPUT_OBSERVATIONS,$/;"	e	enum:output_type	file:
+OUTPUT_PREDICTIONS	predictord.c	/^	OUTPUT_PREDICTIONS,$/;"	e	enum:output_type	file:
+PREDICT_H	predict.h	2;"	d
+PREDICT_IMPL_H	predict_impl.h	4;"	d
+R_T	predict.h	/^	float R_T;$/;"	m	struct:prediction_struct
+R_f	predict.h	/^	float R_f;$/;"	m	struct:prediction_struct
+SUM_X	predict_impl.h	10;"	d
+SUM_XX	predict_impl.h	11;"	d
+TYPE_NONE	predict.h	/^enum prediction_type { TYPE_NONE, TYPE_ONE, TYPE_TWO };$/;"	e	enum:prediction_type
+TYPE_ONE	predict.h	/^enum prediction_type { TYPE_NONE, TYPE_ONE, TYPE_TWO };$/;"	e	enum:prediction_type
+TYPE_TWO	predict.h	/^enum prediction_type { TYPE_NONE, TYPE_ONE, TYPE_TWO };$/;"	e	enum:prediction_type
+_GNU_SOURCE	predictord.c	1;"	d	file:
+compact	predictord.c	/^compact(void *arg)$/;"	f
+f_T_zero	predict.h	/^	float f_T_zero;$/;"	m	struct:prediction_struct
+f_e	predict.h	/^	float f_e;$/;"	m	struct:prediction_struct
+f_f_zero	predict.h	/^	float f_f_zero;$/;"	m	struct:prediction_struct
+get_line	predictord.c	/^get_line(FILE *ifile, FILE *ofile, char *node, char *zone,$/;"	f
+lsq_fit	predict.c	/^lsq_fit(struct lsq_struct *lsq, long long new_y, long long *m, long long *c)$/;"	f	file:
+lsq_struct	predict.h	/^struct lsq_struct {$/;"	s
+main	predictord.c	/^main(int argc, char **argv)$/;"	f
+n_cv	predictord.c	/^	pthread_cond_t n_cv;$/;"	m	struct:node_hash_entry	file:
+n_do_compact	predictord.c	/^	int n_do_compact;$/;"	m	struct:node_hash_entry	file:
+n_lock	predictord.c	/^	pthread_mutex_t n_lock;$/;"	m	struct:node_hash_entry	file:
+n_node_id	predictord.c	/^	char *n_node_id;$/;"	m	struct:node_hash_entry	file:
+n_thread	predictord.c	/^	pthread_t n_thread;$/;"	m	struct:node_hash_entry	file:
+n_zone_hash	predictord.c	/^	struct hsearch_data n_zone_hash;$/;"	m	struct:node_hash_entry	typeref:struct:node_hash_entry::hsearch_data	file:
+node_hash_entry	predictord.c	/^struct node_hash_entry {$/;"	s	file:
+order	predict.h	/^	int order;$/;"	m	struct:prediction_struct
+output_type	predictord.c	/^enum output_type {$/;"	g	file:
+plot	predictord.c	/^plot(struct zone_hash_entry *zhe, unsigned long *free,$/;"	f
+predict	predict.c	/^predict(unsigned long *free, struct lsq_struct *lsq, int threshold, int R_c,$/;"	f
+prediction_struct	predict.h	/^struct prediction_struct {$/;"	s
+prediction_type	predict.h	/^enum prediction_type { TYPE_NONE, TYPE_ONE, TYPE_TWO };$/;"	g
+ready	predict.h	/^	int ready;$/;"	m	struct:lsq_struct
+scan_line	predictord.c	/^scan_line(char *line, char *node, char *zone, unsigned long *nr_free)$/;"	f
+slot	predict.h	/^	int slot;$/;"	m	struct:lsq_struct
+sum_xy	predict.h	/^	long long sum_xy;$/;"	m	struct:lsq_struct
+sum_y	predict.h	/^	long long sum_y;$/;"	m	struct:lsq_struct
+t_e	predict.h	/^	float t_e;$/;"	m	struct:prediction_struct
+type	predict.h	/^	enum prediction_type type;$/;"	m	struct:prediction_struct	typeref:enum:prediction_struct::prediction_type
+y	predict.h	/^	long long y[COUNT];$/;"	m	struct:lsq_struct
+z_lsq	predictord.c	/^	struct lsq_struct z_lsq[MAX_ORDER];$/;"	m	struct:zone_hash_entry	typeref:struct:zone_hash_entry::lsq_struct	file:
+z_n	predictord.c	/^	int z_n;$/;"	m	struct:zone_hash_entry	file:
+z_next	predictord.c	/^	struct zone_hash_entry *z_next;$/;"	m	struct:zone_hash_entry	typeref:struct:zone_hash_entry::zone_hash_entry	file:
+z_node	predictord.c	/^	char *z_node;$/;"	m	struct:zone_hash_entry	file:
+z_output	predictord.c	/^	FILE *z_output[MAX_OUTPUT];$/;"	m	struct:zone_hash_entry	file:
+z_zone	predictord.c	/^	char *z_zone;$/;"	m	struct:zone_hash_entry	file:
+zone_hash_entry	predictord.c	/^struct zone_hash_entry {$/;"	s	file:
