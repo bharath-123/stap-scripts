@@ -1,0 +1,197 @@
+From b5f7ab8ced610b4693bc450067bbf21ee3dd25f5 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Wed, 19 Jun 2019 22:04:41 +0530
+Subject: [PATCH] Added proc_fs interface for predictions. Needed to wire some
+ things up to make it work
+
+---
+ Makefile               |  2 +-
+ include/linux/lsq.h    |  7 +++++++
+ include/linux/mmzone.h |  3 +++
+ mm/lsq.c               |  8 ++++++--
+ mm/page_alloc.c        |  2 ++
+ mm/vmstat.c            | 47 +++++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 66 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index b81e172..cafab75 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 5
+ PATCHLEVEL = 2
+ SUBLEVEL = 0
+-EXTRAVERSION = -rc4
++EXTRAVERSION = -pm
+ NAME = Golden Lions
+ 
+ # *DOCUMENTATION*
+diff --git a/include/linux/lsq.h b/include/linux/lsq.h
+index 9316c9a..2c52ade 100644
+--- a/include/linux/lsq.h
++++ b/include/linux/lsq.h
+@@ -4,6 +4,12 @@
+ #define COUNT_ORDER 3
+ #define COUNT (1<<COUNT_ORDER)
+ 
++enum prediction_type {
++	TYPE_NONE,
++	TYPE_ONE,
++	TYPE_TWO,
++};
++
+ struct lsq_struct {
+ 	int slot; 
+ 	int ready; 
+@@ -14,6 +20,7 @@ struct lsq_struct {
+ 
+ struct prediction_struct {
+ 	int order; 
++	int type; 
+ 	unsigned long f_T_zero;
+ 	unsigned long R_T;
+ 	unsigned long f_f_zero; 
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index afae9ab..2418ae0 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -557,6 +557,9 @@ struct zone {
+ 	bool			contiguous;
+ 
+ 	struct lsq_struct	lsq[MAX_ORDER];
++	
++	/* Store the most recent prediction for this zone */
++	struct prediction_struct	*p; 
+ 
+ 	ZONE_PADDING(_pad3_)
+ 	/* Zone statistics */
+diff --git a/mm/lsq.c b/mm/lsq.c
+index b21161f..1ed070f 100644
+--- a/mm/lsq.c
++++ b/mm/lsq.c
+@@ -98,8 +98,10 @@ predict(unsigned long *frag_vec, struct lsq_struct *lsq)
+ 				temp2 = (p->R_f - p->R_T) + p->f_T_zero;
+ 				do_div(temp1,temp2);
+ 				p->f_e = temp1;
+-				if (p->f_e > threshold) 
++				if (p->f_e > threshold) {
++					p->type = TYPE_ONE;
+ 					return p;
++				}
+ 			}
+ 		}
+ 
+@@ -113,8 +115,10 @@ predict(unsigned long *frag_vec, struct lsq_struct *lsq)
+ 				temp2 = (p->R_f + R_c - p->R_T) + p->f_T_zero;
+ 				do_div(temp1,temp2);
+ 				p->f_e = temp1;
+-				if (p->f_e > threshold) 
++				if (p->f_e > threshold) { 
++					p->type = TYPE_TWO;
+ 					return p;
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 3dacdaa..598b1c6 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -2340,6 +2340,8 @@ check_for_future_ext_frags(struct zone *zone) {
+ 
+ 	result = predict(frag_vec, zone->lsq);
+ 
++	zone->p = result; 
++
+ 	return result;
+ }
+ 
+diff --git a/mm/vmstat.c b/mm/vmstat.c
+index fd7e16c..c0286c4 100644
+--- a/mm/vmstat.c
++++ b/mm/vmstat.c
+@@ -28,6 +28,7 @@
+ #include <linux/mm_inline.h>
+ #include <linux/page_ext.h>
+ #include <linux/page_owner.h>
++#include <linux/lsq.h>
+ 
+ #include "internal.h"
+ 
+@@ -1367,6 +1368,43 @@ static int frag_show(struct seq_file *m, void *arg)
+ 	return 0;
+ }
+ 
++static void predictioninfo_show_print(struct seq_file *m, pg_data_t *pgdat,
++						struct zone *zone)
++{
++	unsigned long y, dx, dy; 
++	
++	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
++	seq_printf(m, "%d", zone->p->order);
++	seq_printf(m, "%lu %lu %lu", zone->p->f_T_zero, -COUNT,
++				(-COUNT * zone->p->R_T));
++	seq_printf(m, "%lu %lu %lu", zone->p->f_T_zero, zone->p->t_e,
++				(zone->p->f_e - zone->p->f_T_zero));
++	seq_printf(m, "%lu %lu %lu", zone->p->f_f_zero, -COUNT,
++				(COUNT * zone->p->R_f));
++
++	if (zone->p->type == TYPE_ONE) {
++		y = zone->p->f_f_zero; 
++		dx = zone->p->t_e; 
++		dy = zone->p->f_e - y; 
++	} else {
++		y = zone->p->f_f_zero + zone->p->R_f;
++		dx = zone->p->t_e - 1; 
++		dy = zone->p->f_e - y;
++	}
++
++	seq_printf(m, "%lu %lu %lu", y, dx, dy);
++
++	seq_putc(m, '\n');	
++
++}
++
++static int predictioninfo_show(struct seq_file *m, void *arg)
++{
++	pg_data_t *pgdat = (pg_data_t *)arg; 
++	walk_zones_in_node(m, pgdat, true, false, predictioninfo_show_print);
++	return 0;
++}
++
+ static void pagetypeinfo_showfree_print(struct seq_file *m,
+ 					pg_data_t *pgdat, struct zone *zone)
+ {
+@@ -1509,6 +1547,7 @@ static int pagetypeinfo_show(struct seq_file *m, void *arg)
+ 	return 0;
+ }
+ 
++
+ static const struct seq_operations fragmentation_op = {
+ 	.start	= frag_start,
+ 	.next	= frag_next,
+@@ -1523,6 +1562,13 @@ static const struct seq_operations pagetypeinfo_op = {
+ 	.show	= pagetypeinfo_show,
+ };
+ 
++static const struct seq_operations prediction_op = {
++	.start  = frag_start,
++        .next   = frag_next, 	
++	.stop	= frag_stop,
++	.show	= predictioninfo_show,
++};
++
+ static bool is_zone_first_populated(pg_data_t *pgdat, struct zone *zone)
+ {
+ 	int zid;
+@@ -1969,6 +2015,7 @@ void __init init_mm_internals(void)
+ 	start_shepherd_timer();
+ #endif
+ #ifdef CONFIG_PROC_FS
++	proc_create_seq("predictions", 0444, NULL, &prediction_op);
+ 	proc_create_seq("buddyinfo", 0444, NULL, &fragmentation_op);
+ 	proc_create_seq("pagetypeinfo", 0444, NULL, &pagetypeinfo_op);
+ 	proc_create_seq("vmstat", 0444, NULL, &vmstat_op);
+-- 
+2.7.4
+

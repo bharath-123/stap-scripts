@@ -1,0 +1,62 @@
+From f984e3ba01ebaf05a693461520f9348fa11f5337 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Sun, 2 Jun 2019 19:12:08 +0530
+Subject: [PATCH] reply to patch
+
+---
+ mm/vmscan.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index e979705..f2c4ad5 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3572,6 +3572,7 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 	sc.priority = DEF_PRIORITY;
+ 	do {
+ 		unsigned long nr_reclaimed = sc.nr_reclaimed;
++		printk(KERN_ALERT "sc.nr_reclaimed is %ul\n",sc.nr_reclaimed);
+ 		bool raise_priority = true;
+ 		bool balanced;
+ 		bool ret;
+@@ -4182,6 +4183,8 @@ static int __node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned in
+ 		.may_unmap = !!(node_reclaim_mode & RECLAIM_UNMAP),
+ 		.may_swap = 1,
+ 		.reclaim_idx = gfp_zone(gfp_mask),
++		.may_shrinkslab = (pgdat->min_slab_pages < 
++				node_page_state(pgdat, NR_SLAB_RECLAIMABLE)),
+ 	};
+ 
+ 	cond_resched();
+@@ -4204,6 +4207,28 @@ static int __node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned in
+ 		do {
+ 			shrink_node(pgdat, &sc);
+ 		} while (sc.nr_reclaimed < nr_pages && --sc.priority >= 0);
++	} else if (sc.may_shrinkslab) {
++		/*
++		 * If the reclaimable pagecache is not greater than
++		 * min_unmapped_pages, only reclaim the slab.
++		 */
++		struct mem_cgroup *memcg;
++		struct mem_cgroup_reclaim_cookie reclaim = {
++			.pgdat = pgdat,
++		};
++
++		do {
++			reclaim.priority = sc.priority;
++			memcg = mem_cgroup_iter(NULL, NULL, &reclaim);
++			do {
++				shrink_slab(sc.gfp_mask, pgdat->node_id,
++					    memcg, sc.priority);
++			} while ((memcg = mem_cgroup_iter(NULL, memcg,
++							  &reclaim)));
++
++			sc.nr_reclaimed += reclaim_state.reclaimed_slab;
++			reclaim_state.reclaimed_slab = 0;
++		} while (sc.nr_reclaimed < nr_pages && --sc.priority >= 0);
+ 	}
+ 
+ 	p->reclaim_state = NULL;
+-- 
+2.7.4
+
