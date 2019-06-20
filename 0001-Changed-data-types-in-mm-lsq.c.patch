@@ -1,0 +1,174 @@
+From a4a5b60de301588514227ac6316777de533e6771 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Fri, 21 Jun 2019 01:25:31 +0530
+Subject: [PATCH] Changed data types in mm/lsq.c
+
+---
+ mm/lsq.c | 94 +++++++++++++++++++++++++++++++---------------------------------
+ 1 file changed, 46 insertions(+), 48 deletions(-)
+
+diff --git a/mm/lsq.c b/mm/lsq.c
+index 1ed070f..cb2abcb 100644
+--- a/mm/lsq.c
++++ b/mm/lsq.c
+@@ -9,14 +9,13 @@
+ unsigned long R_c = 2500;
+ unsigned long threshold = 10; 
+ 
+-unsigned long SUM_X = (COUNT - (1<<2*COUNT_ORDER))>>1;
+-unsigned long SUM_XX = (2*(1<<3*COUNT_ORDER) - 3*(1<<2*COUNT_ORDER) + 1);
++long long SUM_X = ((COUNT * (1 - COUNT)) / 2);
++long long SUM_XX = ((COUNT * (COUNT - 1) * (2 * COUNT - 1)) / 6);
+ 
+ static int
+-lsq_fit(struct lsq_struct *lsq, unsigned long new_y, unsigned long *m, unsigned long *c)
++lsq_fit(struct lsq_struct *lsq, unsigned long new_y, long long *m, long long *c)
+ {
+-	unsigned long oldest_y;
+-	unsigned long temp1, temp2;
++	unsigned long long oldest_y;
+ 
+ 	oldest_y = lsq->y[lsq->slot];
+ 
+@@ -26,32 +25,22 @@ lsq_fit(struct lsq_struct *lsq, unsigned long new_y, unsigned long *m, unsigned
+ 
+ 	lsq->sum_y += new_y;
+ 	if (lsq->ready)
+-		lsq->sum_y -= oldest_y; 
++		lsq->sum_y -= oldest_y;
+ 
+-	lsq->y[lsq->slot++] = new_y; 
++	lsq->y[lsq->slot++] = new_y;
+ 
+ 	if (lsq->slot == COUNT) {
+ 		lsq->slot = 0;
+ 		lsq->ready = 1;
+ 	}
+ 
+-	if (!lsq->ready) 
+-		return -1; 
++	if (!lsq->ready)
++		return -1;
+ 
+-	do_div(SUM_XX,6);
++	*m = (COUNT * lsq->sum_xy - SUM_X * lsq->sum_y) /
++	    (COUNT * SUM_XX - SUM_X * SUM_X);
+ 
+-	temp1 = (COUNT * lsq->sum_xy - SUM_X * lsq->sum_y);
+-	temp2 = (COUNT * SUM_XX - SUM_X * SUM_X);
+-
+-	do_div(temp1,temp2);
+-
+-	*m = temp1; 
+-
+-	temp1 = (lsq->sum_y - *m * SUM_X);
+-	
+-	do_div(temp1, COUNT);
+-
+-	*c = temp1; 
++	*c = (lsq->sum_y - *m * SUM_X) / COUNT;
+ 
+ 	return 0;
+ }
+@@ -59,27 +48,25 @@ lsq_fit(struct lsq_struct *lsq, unsigned long new_y, unsigned long *m, unsigned
+ struct prediction_struct *
+ predict(unsigned long *frag_vec, struct lsq_struct *lsq)
+ {
+-	struct prediction_struct *p;
+ 	int order;
+-	unsigned long m[MAX_ORDER];
+-	unsigned long c[MAX_ORDER];
++	long long m[MAX_ORDER];
++	long long c[MAX_ORDER];
+ 	int is_ready = 1;
++	struct prediction_struct *p;
+ 
+-	for(order = 0; order < MAX_ORDER; order++) {
++	for (order = 0; order < MAX_ORDER; order++) {
+ 		if (lsq_fit(&lsq[order], frag_vec[order], &m[order],
+-				&c[order]) == -1)
++		    &c[order]) == -1)
+ 			is_ready = 0;
+ 	}
+ 
+ 	if (!is_ready)
+-		return NULL; 
++		return NULL;
+ 
+ 	p->f_T_zero = c[0];
+ 	p->R_T = m[0];
+ 
+ 	for (order = 1; order < MAX_ORDER; order++) {
+-		unsigned long temp1;
+-		unsigned long temp2; 
+ 
+ 		p->order = order;
+ 		p->f_f_zero = c[order];
+@@ -87,17 +74,25 @@ predict(unsigned long *frag_vec, struct lsq_struct *lsq)
+ 
+ 		if (p->f_T_zero <= p->f_f_zero)
+ 			continue;
+-		
++
++		/*
++		 * There are only two reasons to begin compaction immediately,
++		 * i.e. at the beginning of this interval.  The first is that
++		 * the alternative would be exhaustion before the beginning of
++		 * the next interval.
++		 */
+ 		if (p->R_T < p->R_f) {
+-			temp1 = (p->f_T_zero - p->f_f_zero);
+-			temp2 = (p->R_f - p->R_T);
+-			do_div(temp1,temp2);
+-			p->t_e = temp1; 
++			p->t_e = (p->f_T_zero - p->f_f_zero) /
++			    (p->R_f - p->R_T);
+ 			if (p->t_e < 1) {
+-				temp1 = (p->f_T_zero - p->f_f_zero) * p->R_T;
+-				temp2 = (p->R_f - p->R_T) + p->f_T_zero;
+-				do_div(temp1,temp2);
+-				p->f_e = temp1;
++				/*
++				 * Don't bother compacting if the expected
++				 * fragmentation improves upon the given
++				 * threshold.
++				 */
++				p->f_e = (p->f_T_zero - p->f_f_zero) *
++				    p->R_T / (p->R_f - p->R_T) +
++				    p->f_T_zero;
+ 				if (p->f_e > threshold) {
+ 					p->type = TYPE_ONE;
+ 					return p;
+@@ -105,17 +100,20 @@ predict(unsigned long *frag_vec, struct lsq_struct *lsq)
+ 			}
+ 		}
+ 
++		/*
++		 * The second reason is that deferring compaction until the
++		 * start of the next interval would result, at the time of
++		 * exhaustion, in a surfeit of free fragmented memory above the
++		 * desired threshold.
++		 */
+ 		if (p->R_T < p->R_f + R_c) {
+-			temp1 = (p->f_T_zero - p->f_f_zero + R_c);
+-			temp2 = (p->R_f + R_c - p->R_T);
+-			do_div(temp1,temp2);
+-			p->t_e = temp1; 
++			p->t_e = (p->f_T_zero - p->f_f_zero + R_c) /
++			    (p->R_f + R_c - p->R_T);
+ 			if (p->t_e > 1) {
+-				temp1 = (p->f_T_zero - p->f_f_zero + R_c) * p->R_T;
+-				temp2 = (p->R_f + R_c - p->R_T) + p->f_T_zero;
+-				do_div(temp1,temp2);
+-				p->f_e = temp1;
+-				if (p->f_e > threshold) { 
++				p->f_e = (p->f_T_zero - p->f_f_zero + R_c) *
++				    p->R_T / (p->R_f + R_c - p->R_T) +
++				    p->f_T_zero;
++				if (p->f_e > threshold) {
+ 					p->type = TYPE_TWO;
+ 					return p;
+ 				}
+-- 
+2.7.4
+
