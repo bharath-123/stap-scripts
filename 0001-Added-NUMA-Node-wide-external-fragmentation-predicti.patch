@@ -1,0 +1,185 @@
+From eb594665cd23bce6b0ad7f2b982c6e6da1f1e409 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 20 Jun 2019 20:39:12 +0530
+Subject: [PATCH] Added NUMA Node wide external fragmentation prediction rather
+ than per-zone prediction
+
+---
+ mm/page_alloc.c | 48 +++++-------------------------------------------
+ mm/vmscan.c     | 55 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ mm/vmstat.c     |  3 +++
+ 3 files changed, 63 insertions(+), 43 deletions(-)
+
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 598b1c6..600b99c 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -2313,39 +2313,6 @@ static inline void boost_watermark(struct zone *zone)
+ }
+ 
+ /*
+- * Check whether this zone could have bad potential external  
+- * fragmentation in the future
+- */
+-
+-static struct prediction_struct *
+-check_for_future_ext_frags(struct zone *zone) {	 
+-	unsigned long frag_vec[MAX_ORDER];
+-	int order;
+-	unsigned long total_free_pages;
+-	unsigned long curr_free_pages; 
+-	struct prediction_struct *result; 
+-
+-	total_free_pages = frag_vec[0] = 0;
+-	for (order = 0; order < MAX_ORDER; order++) {
+-		curr_free_pages = zone->free_area[order].nr_free << order;
+-
+-		total_free_pages += curr_free_pages; 
+-
+-		if (order < MAX_ORDER - 1) {
+-			frag_vec[order + 1] = 
+-				frag_vec[order] + curr_free_pages; 
+-		}		
+-	}
+-	frag_vec[0] = total_free_pages; 
+-
+-	result = predict(frag_vec, zone->lsq);
+-
+-	zone->p = result; 
+-
+-	return result;
+-}
+-
+-/*
+  * This function implements actual steal behaviour. If order is large enough,
+  * we can steal whole pageblock. If not, we first move freepages in this
+  * pageblock to our migratetype and determine how many already-allocated pages
+@@ -2360,10 +2327,8 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
+ 	struct free_area *area;
+ 	int free_pages, movable_pages, alike_pages;
+ 	int old_block_type;
+-	struct prediction_struct *prediction = NULL;
+ 
+ 	old_block_type = get_pageblock_migratetype(page);
+-	prediction = check_for_future_ext_frags(zone);
+ 
+ 	/*
+ 	 * This can happen due to races and we want to prevent broken
+@@ -2382,14 +2347,11 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
+ 	 * Boost watermarks to increase reclaim pressure to reduce the
+ 	 * likelihood of future fallbacks. Wake kswapd now as the node
+ 	 * may be balanced overall and kswapd will not wake naturally.
+-	 * If potential fragmentation event could occur, then boost the 
+-	 * watermarks.
+ 	 */
+-	if (prediction) { 
+-		boost_watermark(zone);
+-		if (alloc_flags & ALLOC_KSWAPD)
+-			set_bit(ZONE_BOOSTED_WATERMARK, &zone->flags);
+-	}
++	boost_watermark(zone);
++	if (alloc_flags & ALLOC_KSWAPD)
++		set_bit(ZONE_BOOSTED_WATERMARK, &zone->flags);
++
+ 	/* We are not allowed to try stealing from the whole block */
+ 	if (!whole_block)
+ 		goto single_page;
+@@ -3260,7 +3222,7 @@ struct page *rmqueue(struct zone *preferred_zone,
+ 		}
+ 		if (!page)
+ 			page = __rmqueue(zone, order, migratetype, alloc_flags);
+-	} while (page && check_new_pages(page, order));
++	} while (page && check_new_pages(page, order));	
+ 	spin_unlock(&zone->lock);
+ 	if (!page)
+ 		goto failed;
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 7acd0af..f9482a9 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3345,6 +3345,58 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
+ 	clear_bit(PGDAT_WRITEBACK, &pgdat->flags);
+ }
+ 
++static struct prediction_struct *
++zone_potential_frag(struct zone *zone)
++{
++	unsigned long frag_vec[MAX_ORDER];
++	int order; 
++	unsigned long total_free_pages; 
++	unsigned long curr_free_pages; 
++	struct prediction_struct *result;
++
++	pr_info("In zone_potential_frag\n");
++
++	total_free_pages = frag_vec[0] = 0;
++	for (order = 0; order < MAX_ORDER; order++) {
++		curr_free_pages = zone->free_area[order].nr_free << order; 
++		total_free_pages += curr_free_pages; 
++
++		if (order < MAX_ORDER - 1) 
++			frag_vec[order + 1] = 
++				frag_vec[order] + curr_free_pages;
++	}
++	frag_vec[0] = total_free_pages;
++
++	result = predict(frag_vec, zone->lsq);
++
++	zone->p = result;
++
++	if (result)
++		pr_info("Result is not NULL!\n");	
++	else
++		pr_info("Result is NULL!\n");
++	
++	return result; 
++}
++
++static bool nid_potential_frag(pg_data_t *pgdat, int classzone_idx)
++{
++	struct zone *zone = NULL;
++	int i;
++
++	for (i = 0; i <= classzone_idx; i++) {
++		zone = pgdat->node_zones + i;
++
++		if (!managed_zone(zone))
++			continue;
++
++		if (zone_potential_frag(zone))
++			return true;
++	}
++
++	return false;
++}
++
+ /*
+  * Prepare kswapd for sleeping. This verifies that there are no processes
+  * waiting in throttle_direct_reclaim() and that watermarks have been met.
+@@ -3373,6 +3425,9 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
+ 	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES)
+ 		return true;
+ 
++	if (nid_potential_frag(pgdat, classzone_idx)) 
++		return false;
++
+ 	if (pgdat_balanced(pgdat, order, classzone_idx)) {
+ 		clear_pgdat_congested(pgdat);
+ 		return true;
+diff --git a/mm/vmstat.c b/mm/vmstat.c
+index c0286c4..ad6d8b9 100644
+--- a/mm/vmstat.c
++++ b/mm/vmstat.c
+@@ -1373,6 +1373,9 @@ static void predictioninfo_show_print(struct seq_file *m, pg_data_t *pgdat,
+ {
+ 	unsigned long y, dx, dy; 
+ 	
++	if (!zone->p)
++		return;
++
+ 	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
+ 	seq_printf(m, "%d", zone->p->order);
+ 	seq_printf(m, "%lu %lu %lu", zone->p->f_T_zero, -COUNT,
+-- 
+2.7.4
+
