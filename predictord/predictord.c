@@ -266,6 +266,7 @@ main(int argc, char **argv)
 	int tflag = 0;
 	int iflag = 0;
 	char *iarg;
+	int k = 1; 
 	int oflag = 0;
 	char *obase;
 	int errflag = 0;
@@ -537,9 +538,10 @@ main(int argc, char **argv)
 			continue;
 
 		/* Wake the compactor if requested. */
-		if (!Cflag)
+		if (!Cflag) {
+			printf("Should wake up compactor now:%d\n",k++);
 			continue;
-
+		}
 		if ((err = pthread_mutex_trylock(&nhe->n_lock)) != 0) {
 			if (err == EBUSY)
 				continue;
