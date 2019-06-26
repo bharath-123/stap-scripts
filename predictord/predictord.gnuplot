@@ -22,4 +22,4 @@ for[c=12:3:-1] o u 1:c w l lc (c-2) lw 1 t 'Order '.(c-2), \
 p u 2:3:4:5 w vec nohead lc 1 dt 1 lw 2 noti, \
 p u 2:6:7:8 w vec nohead lc 1 dt 2 lw 2 noti, \
 p u 2:9:10:11:1 w vec nohead lc var dt 1 lw 2 noti, \
-p u 12:13:14:15:1 w vec nohead lc var dt 2 lw 2 noti
+p u 12:13:14:15:1 w vec nohead lc var dt 2 lw 2 noti;

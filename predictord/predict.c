@@ -38,6 +38,8 @@ lsq_fit(struct lsq_struct *lsq, long long new_y, long long *m, long long *c)
 
 	*c = (lsq->sum_y - *m * SUM_X) / COUNT;
 
+	printf("value of m is %ld\n value of is %ld\n\n", *m, *c);
+
 	return 0;
 }
 
