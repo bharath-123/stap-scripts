@@ -5,6 +5,8 @@
 # allocator itself is doing
 #
 # Copyright 2011 Mel Gorman <mgorman@suse.de>
+global stats
+
 %{
 #include <linux/fs.h>
 #include <linux/types.h>
@@ -112,9 +114,10 @@ static int pagealloc_workload1(struct seq_file *m, void *v)
 			if (page)
 				__free_pages(page, order);
 		}
-		cycles += read_clockcycles() - start_cycles;
+		cycles = read_clockcycles() - start_cycles;
 
-		seq_printf(m, "order %d batch %d workload1_cycles %llu", order, batch, cycles);
+		seq_printf(m, "order %d batch %d workload1_cycles %llu\n", order, batch, cycles);
+		//cond_resched();
 	}
 
 	return 0;
@@ -142,9 +145,9 @@ static int pagealloc_workload2(struct seq_file *m, void *v)
 			if (pages[nr_pages]) 
 				__free_pages(pages[nr_pages], order);
 		}
-		cycles += (read_clockcycles() - start_cycles);
+		cycles = (read_clockcycles() - start_cycles);
 
-		seq_printf(m, "order %d batch %d workload2_cycles %llu", order, batch, cycles);
+		seq_printf(m, "order %d batch %d workload2_cycles %llu\n", order, batch, cycles);
 	}
 
 	return 0;
@@ -153,8 +156,36 @@ static int pagealloc_workload2(struct seq_file *m, void *v)
 static int
 pagealloc_open(struct inode *inode, struct file *file)
 {
-    return single_open(file, pagealloc_workload1, NULL);
+    return single_open(file, pagealloc_run, NULL);
 }
+
+static int
+pageworkload1_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, pagealloc_workload1, NULL);
+}
+
+static int 
+pageworkload2_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, pagealloc_workload2, NULL);
+}
+
+static const struct file_operations pageworkload1_fops = {
+	.owner = THIS_MODULE, 
+	.open = pageworkload1_open, 
+	.read = seq_read, 
+	.llseek = seq_lseek, 
+	.release = single_release,
+};
+
+static const struct file_operations pageworkload2_fops = {
+	.owner = THIS_MODULE,
+	.open = pageworkload2_open, 
+	.read = seq_read, 
+	.llseek = seq_lseek, 
+	.release = single_release,
+};
 
 static const struct file_operations pagealloc_fops = {
     .owner      = THIS_MODULE,
@@ -163,17 +194,27 @@ static const struct file_operations pagealloc_fops = {
     .llseek     = seq_lseek,
     .release    = single_release,
 };
+
 %}
 
 function pagealloc_init() %{
     printk(KERN_INFO "Loading pagealloc microbenchmark\n");
     proc_create("mmtests-pagealloc-micro", 0, NULL, &pagealloc_fops);
+    proc_create("mmtests-pagealloc-workload1", 0, NULL, &pageworkload1_fops);
+    proc_create("mmtests-pagealloc-workload2", 0, NULL, &pageworkload2_fops);
 %}
 
 function pagealloc_exit() %{
     remove_proc_entry("mmtests-pagealloc-micro", NULL);
+    remove_proc_entry("mmtests-pagealloc-workload1", NULL);
+    remove_proc_entry("mmtests-pagealloc-workload2", NULL);
     printk(KERN_INFO "Unloading pagealloc microbenchmark.\n");
 %}
+
+probe kernel.function("rmqueue_bulk").return {
+	batch = @entry(count)
+	stats["rmqueue_bulk", execname(), batch] <<< 1
+}
 
 probe begin
 {
@@ -183,4 +224,7 @@ probe begin
 probe end
 {
 	pagealloc_exit()
+	foreach ([f, en,batch] in stats) {
+		printf("rmqueue_bulk called %d by %s at count %d\n", @count(stats[f, en, batch]), en,batch)
+	}
 }

@@ -1,0 +1,440 @@
+From d33554aa7b455b8c9a4f1c0f48704343895dd926 Mon Sep 17 00:00:00 2001
+From: Bharath <linux.bhar@gmail.com>
+Date: Tue, 25 Jun 2019 11:48:27 -0600
+Subject: [PATCH] Added the core infrastructure of the predictive memory
+ reclaim system. This patch is just to apply. No details and stuff.
+
+Signed-off-by: Bharath <linux.bhar@gmail.com>
+---
+ Makefile               |   2 +-
+ include/linux/lsq.h    |  28 ++++++++++++
+ include/linux/mmzone.h |  10 ++++-
+ mm/Makefile            |   2 +-
+ mm/lsq.c               | 117 +++++++++++++++++++++++++++++++++++++++++++++++++
+ mm/page_alloc.c        |   8 +++-
+ mm/vmscan.c            |  92 +++++++++++++++++++++++++++++++++++---
+ 7 files changed, 249 insertions(+), 10 deletions(-)
+ create mode 100644 include/linux/lsq.h
+ create mode 100644 mm/lsq.c
+
+diff --git a/Makefile b/Makefile
+index 26c92f8..3f4f627 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 5
+ PATCHLEVEL = 1
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION =predm
+ NAME = Shy Crocodile
+ 
+ # *DOCUMENTATION*
+diff --git a/include/linux/lsq.h b/include/linux/lsq.h
+new file mode 100644
+index 0000000..84d8092
+--- /dev/null
++++ b/include/linux/lsq.h
+@@ -0,0 +1,28 @@
++#ifndef LSQ_H
++#define LSQ_H
++
++#define COUNT_ORDER 3
++#define COUNT (1<<COUNT_ORDER)
++
++struct lsq_struct {
++	int slot;
++	int ready;
++	long long y[COUNT];
++	long long sum_xy;
++	long long sum_y;
++};
++
++struct prediction_struct {
++	int order;
++	long long f_T_zero;
++	long long R_T;
++	long long f_f_zero;
++	long long R_f;
++	long long t_e;
++	long long f_e;
++};
++
++extern struct prediction_struct *
++predict(unsigned long *frag_vec, struct lsq_struct *lsq, struct prediction_struct *p);
++
++#endif
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index fba7741..809d112 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -18,6 +18,7 @@
+ #include <linux/pageblock-flags.h>
+ #include <linux/page-flags-layout.h>
+ #include <linux/atomic.h>
++#include <linux/lsq.h>
+ #include <asm/page.h>
+ 
+ /* Free memory management - zoned buddy allocator.  */
+@@ -502,6 +503,12 @@ struct zone {
+ 
+ 	bool			contiguous;
+ 
++	/* lsq structures for each order */
++	struct lsq_struct	lsq[MAX_ORDER];
++
++	/* Store the latest non-NULL prediction for this zone */
++	struct prediction_struct *p;
++
+ 	ZONE_PADDING(_pad3_)
+ 	/* Zone statistics */
+ 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
+@@ -526,7 +533,8 @@ enum zone_flags {
+ 	ZONE_BOOSTED_WATERMARK,		/* zone recently boosted watermarks.
+ 					 * Cleared when kswapd is woken.
+ 					 */
+-};
++	ZONE_POTENTIAL_FRAG,		 
++};					
+ 
+ static inline unsigned long zone_managed_pages(struct zone *zone)
+ {
+diff --git a/mm/Makefile b/mm/Makefile
+index d210cc9..bf4f48b 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -25,7 +25,7 @@ mmu-y			:= nommu.o
+ mmu-$(CONFIG_MMU)	:= gup.o highmem.o memory.o mincore.o \
+ 			   mlock.o mmap.o mmu_gather.o mprotect.o mremap.o \
+ 			   msync.o page_vma_mapped.o pagewalk.o \
+-			   pgtable-generic.o rmap.o vmalloc.o
++			   pgtable-generic.o rmap.o vmalloc.o lsq.o
+ 
+ 
+ ifdef CONFIG_CROSS_MEMORY_ATTACH
+diff --git a/mm/lsq.c b/mm/lsq.c
+new file mode 100644
+index 0000000..2a5bddd
+--- /dev/null
++++ b/mm/lsq.c
+@@ -0,0 +1,117 @@
++/*
++ * Least squares implementation
++ */
++
++#include <linux/mmzone.h>
++#include <linux/lsq.h>
++#include <asm/div64.h>
++
++unsigned long R_c = 2500;
++unsigned long threshold = 0;
++
++long long SUM_X = ((COUNT * (1 - COUNT)) / 2);
++long long SUM_XX = ((COUNT * (COUNT - 1) * (2 * COUNT - 1)) / 6);
++
++static int
++lsq_fit(struct lsq_struct *lsq, unsigned long new_y, long long *m, long long *c)
++{
++	unsigned long long oldest_y;
++	long long temp1;
++	long long temp2;
++
++	oldest_y = lsq->y[lsq->slot];
++
++	lsq->sum_xy -= lsq->sum_y;
++	if (lsq->ready)
++		lsq->sum_xy += COUNT * oldest_y;
++
++	lsq->sum_y += new_y;
++	if (lsq->ready)
++		lsq->sum_y -= oldest_y;
++
++	lsq->y[lsq->slot++] = new_y;
++
++	if (lsq->slot == COUNT) {
++		lsq->slot = 0;
++		lsq->ready = 1;
++	}
++
++	if (!lsq->ready)
++		return -1;
++
++	temp1 = (COUNT * lsq->sum_xy - SUM_X * lsq->sum_y);
++	temp2 = (COUNT * SUM_XX - SUM_X * SUM_X);
++
++	temp1 = temp1/temp2;
++
++	*m = temp1;
++
++	temp1 = (lsq->sum_y - *m * SUM_X);
++
++	temp1 = temp1/COUNT;
++
++	*c = temp1;
++
++	return 0;
++}
++
++struct prediction_struct *
++predict(unsigned long *frag_vec, struct lsq_struct *lsq, struct prediction_struct *p)
++{
++	int order;
++	long long m[MAX_ORDER];
++	long long c[MAX_ORDER];
++	int is_ready = 1;
++
++	for(order = 0; order < MAX_ORDER; order++) {
++		if (lsq_fit(&lsq[order], frag_vec[order], &m[order],
++				&c[order]) == -1)
++			is_ready = 0;
++	}
++
++	if (!is_ready)
++		return NULL;
++
++	p->f_T_zero = c[0];
++	p->R_T = m[0];
++	
++	for (order = 1; order < MAX_ORDER; order++) {
++		long long temp1;
++		long long temp2;
++
++		p->order = order;
++		p->f_f_zero = c[order];
++		p->R_f = m[order];
++
++		if (p->f_T_zero <= p->f_f_zero)
++			continue;
++
++		if (p->R_T < p->R_f) {
++			temp1 = (p->f_T_zero - p->f_f_zero);
++			temp2 = (p->R_f - p->R_T);
++			p->t_e = temp1 / temp2;
++			if (p->t_e < 1) {
++				temp1 = (p->f_T_zero - p->f_f_zero) * p->R_T;
++				temp2 = (p->R_f - p->R_T) + p->f_T_zero;
++				p->f_e = temp1 / temp2;
++				if (p->f_e > threshold)
++					return p;
++			}
++		}
++
++		if (p->R_T < p->R_f + R_c) {
++			temp1 = (p->f_T_zero - p->f_f_zero + R_c);
++			temp2 = (p->R_f + R_c - p->R_T);
++			p->t_e = temp1 / temp2;
++			if (p->t_e > 1) {
++				temp1 = (p->f_T_zero - p->f_f_zero + R_c) * p->R_T;
++				temp2 = (p->R_f + R_c - p->R_T) + p->f_T_zero;
++				p->f_e = temp1 / temp2;
++				if (p->f_e > threshold)
++					return p;
++			}
++		}
++	}
++
++	return NULL;
++}
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index c02cff1..ff31f86 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -67,6 +67,7 @@
+ #include <linux/lockdep.h>
+ #include <linux/nmi.h>
+ #include <linux/psi.h>
++#include <linux/lsq.h>
+ 
+ #include <asm/sections.h>
+ #include <asm/tlbflush.h>
+@@ -310,6 +311,11 @@ bool pm_suspended_storage(void)
+ 
+ int page_group_by_mobility_disabled __read_mostly;
+ 
++/*
++ * compaction_rate and fragmentation_threshold can be given as sysctls
++ * fragmentation_threshold could be subject to change after a compaction pass
++ */
++
+ #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
+ /*
+  * During boot we initialize deferred pages on-demand, as needed, but once
+@@ -2293,11 +2299,11 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
+ 	 * Boost watermarks to increase reclaim pressure to reduce the
+ 	 * likelihood of future fallbacks. Wake kswapd now as the node
+ 	 * may be balanced overall and kswapd will not wake naturally.
++	 * 
+ 	 */
+ 	boost_watermark(zone);
+ 	if (alloc_flags & ALLOC_KSWAPD)
+ 		set_bit(ZONE_BOOSTED_WATERMARK, &zone->flags);
+-
+ 	/* We are not allowed to try stealing from the whole block */
+ 	if (!whole_block)
+ 		goto single_page;
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index a815f73..073ff28 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3404,6 +3404,57 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
+ 	clear_bit(PGDAT_WRITEBACK, &pgdat->flags);
+ }
+ 
++static struct prediction_struct *
++zone_potential_frag(struct zone *zone)
++{
++	unsigned long frag_vec[MAX_ORDER];
++	int order; 
++	unsigned long total_free_pages; 
++	unsigned long curr_free_pages; 
++	struct prediction_struct *result;
++	struct prediction_struct predictor;	
++	//unsigned long flags; 	
++
++	//spin_lock_irqsave(&zone->lock, flags);
++	total_free_pages = frag_vec[0] = 0;
++	for (order = 0; order < MAX_ORDER; order++) {
++		curr_free_pages = zone->free_area[order].nr_free << order; 
++		total_free_pages += curr_free_pages; 
++
++		if (order < MAX_ORDER - 1) 
++			frag_vec[order + 1] = 
++				frag_vec[order] + curr_free_pages;
++	}
++	frag_vec[0] = total_free_pages;
++	//spin_unlock_irqrestore(&zone->lock, flags);
++
++	result = predict(frag_vec, zone->lsq, &predictor);
++
++	zone->p = result;
++	
++	return result; 
++}
++
++static bool nid_potential_frag(pg_data_t *pgdat, int classzone_idx)
++{
++	struct zone *zone = NULL;
++	int i;
++
++	for (i = 0; i <= classzone_idx; i++) {
++		zone = pgdat->node_zones + i;
++
++		if (!managed_zone(zone))
++			continue;
++
++		if (zone_potential_frag(zone)) {
++			set_bit(ZONE_POTENTIAL_FRAG, &zone->flags);
++			return true;
++		}
++	}
++
++	return false;
++}
++
+ /*
+  * Prepare kswapd for sleeping. This verifies that there are no processes
+  * waiting in throttle_direct_reclaim() and that watermarks have been met.
+@@ -3432,6 +3483,9 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
+ 	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES)
+ 		return true;
+ 
++	if (nid_potential_frag(pgdat, classzone_idx)) 
++		return false;
++
+ 	if (pgdat_balanced(pgdat, order, classzone_idx)) {
+ 		clear_pgdat_congested(pgdat);
+ 		return true;
+@@ -3505,6 +3559,7 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 	unsigned long nr_boost_reclaim;
+ 	unsigned long zone_boosts[MAX_NR_ZONES] = { 0, };
+ 	bool boosted;
++	bool potential_frag = 0;
+ 	struct zone *zone;
+ 	struct scan_control sc = {
+ 		.gfp_mask = GFP_KERNEL,
+@@ -3533,6 +3588,17 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 	}
+ 	boosted = nr_boost_reclaim;
+ 
++	for (i = 0; i <= classzone_idx; i++) {
++		zone = pgdat->node_zones + i;
++		if (!managed_zone(zone))
++			continue;
++
++		if (test_bit(ZONE_POTENTIAL_FRAG, &zone->flags)) {
++			potential_frag = 1;
++			break;
++		}
++	}
++
+ restart:
+ 	sc.priority = DEF_PRIORITY;
+ 	do {
+@@ -3572,8 +3638,9 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 		 * re-evaluate if boosting is required when kswapd next wakes.
+ 		 */
+ 		balanced = pgdat_balanced(pgdat, sc.order, classzone_idx);
+-		if (!balanced && nr_boost_reclaim) {
++		if (!balanced && (nr_boost_reclaim || potential_frag)) {
+ 			nr_boost_reclaim = 0;
++			potential_frag = 0;
+ 			goto restart;
+ 		}
+ 
+@@ -3582,11 +3649,11 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 		 * eligible zones. Note that sc.reclaim_idx is not used as
+ 		 * buffer_heads_over_limit may have adjusted it.
+ 		 */
+-		if (!nr_boost_reclaim && balanced)
++		if ((!nr_boost_reclaim && !potential_frag) && balanced)
+ 			goto out;
+ 
+ 		/* Limit the priority of boosting to avoid reclaim writeback */
+-		if (nr_boost_reclaim && sc.priority == DEF_PRIORITY - 2)
++		if ((nr_boost_reclaim || potential_frag) && sc.priority == DEF_PRIORITY - 2)
+ 			raise_priority = false;
+ 
+ 		/*
+@@ -3595,9 +3662,9 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 		 * from reclaim context. If no pages are reclaimed, the
+ 		 * reclaim will be aborted.
+ 		 */
+-		sc.may_writepage = !laptop_mode && !nr_boost_reclaim;
+-		sc.may_swap = !nr_boost_reclaim;
+-		sc.may_shrinkslab = !nr_boost_reclaim;
++		sc.may_writepage = !laptop_mode && !nr_boost_reclaim && !potential_frag;
++		sc.may_swap = !nr_boost_reclaim && !potential_frag;
++		sc.may_shrinkslab = !nr_boost_reclaim && !potential_frag;
+ 
+ 		/*
+ 		 * Do some background aging of the anon list, to give
+@@ -3660,6 +3727,9 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 		if (nr_boost_reclaim && !nr_reclaimed)
+ 			break;
+ 
++		if (potential_frag && !nr_reclaimed)
++			break;
++
+ 		if (raise_priority || !nr_reclaimed)
+ 			sc.priority--;
+ 	} while (sc.priority >= 1);
+@@ -3690,6 +3760,16 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 		wakeup_kcompactd(pgdat, pageblock_order, classzone_idx);
+ 	}
+ 
++	for (i = 0; i <= classzone_idx; i++) {
++		zone = pgdat->node_zones + i;
++
++		if (test_bit(ZONE_POTENTIAL_FRAG, &zone->flags)) {
++			clear_bit(ZONE_POTENTIAL_FRAG, &zone->flags);
++			wakeup_kcompactd(pgdat, pageblock_order, classzone_idx);
++			break;
++		}
++	}
++
+ 	snapshot_refaults(NULL, pgdat);
+ 	__fs_reclaim_release();
+ 	psi_memstall_leave(&pflags);
+-- 
+1.8.3.1
+
