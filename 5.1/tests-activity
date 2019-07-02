@@ -1,0 +1,14 @@
+1561955079 run-mmtests: Start
+1561955079 run-mmtests: Iteration 0 start
+1561955080 run-mmtests: begin paralleldd
+1561955378 paralleldd-bench: iteration 1
+1561955678 paralleldd-bench: iteration 2
+1561955977 paralleldd-bench: iteration 3
+1561956693 paralleldd-bench: iteration 1
+1561956999 paralleldd-bench: iteration 2
+1561957311 paralleldd-bench: iteration 3
+1561958075 paralleldd-bench: iteration 1
+1561958375 paralleldd-bench: iteration 2
+1561958681 paralleldd-bench: iteration 3
+1561958996 run-mmtests: Iteration 0 end
+1561958996 run-mmtests: End
