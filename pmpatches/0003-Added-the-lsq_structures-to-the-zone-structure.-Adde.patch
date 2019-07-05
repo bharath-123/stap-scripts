@@ -1,0 +1,45 @@
+From 62fac40337307061d7bb16165ea50e376fbb16a5 Mon Sep 17 00:00:00 2001
+From: Bharath <linux.bhar@gmail.com>
+Date: Thu, 4 Jul 2019 05:28:34 -0600
+Subject: [PATCH 3/6] Added the lsq_structures to the zone structure. Added a
+ zone flag to indicate whether a zone could be potentially fragmented or not
+
+---
+ include/linux/mmzone.h | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index fba7741..832621a 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -19,6 +19,7 @@
+ #include <linux/page-flags-layout.h>
+ #include <linux/atomic.h>
+ #include <asm/page.h>
++#include <linux/lsq.h>
+ 
+ /* Free memory management - zoned buddy allocator.  */
+ #ifndef CONFIG_FORCE_MAX_ZONEORDER
+@@ -502,6 +503,9 @@ struct zone {
+ 
+ 	bool			contiguous;
+ 
++	/* lsq structures for each order */
++	struct lsq_struct	lsq[MAX_ORDER];
++
+ 	ZONE_PADDING(_pad3_)
+ 	/* Zone statistics */
+ 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
+@@ -526,7 +530,8 @@ enum zone_flags {
+ 	ZONE_BOOSTED_WATERMARK,		/* zone recently boosted watermarks.
+ 					 * Cleared when kswapd is woken.
+ 					 */
+-};
++	ZONE_POTENTIAL_FRAG,
++};
+ 
+ static inline unsigned long zone_managed_pages(struct zone *zone)
+ {
+-- 
+1.8.3.1
+
