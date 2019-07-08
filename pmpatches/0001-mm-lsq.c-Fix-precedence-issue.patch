@@ -1,0 +1,41 @@
+From 345d8308dff53cd3225c1dc8fec63419a22b1f47 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Mon, 8 Jul 2019 14:08:25 -0600
+Subject: [PATCH] mm/lsq.c: Fix precedence issue
+
+This patch fixes a precedence issue which occured when div64_long
+was introduced.
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ mm/lsq.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/mm/lsq.c b/mm/lsq.c
+index 49438b0..df332a7 100644
+--- a/mm/lsq.c
++++ b/mm/lsq.c
+@@ -138,9 +138,7 @@ int predict(unsigned long *frag_vec, struct lsq_struct *lsq)
+ 				 * Don't bother compacting if the expected
+ 				 * fragmentation improves upon the given
+ 				 * threshold.																	*/
+-				f_e = div64_long(((f_T_zero - f_f_zero) * R_T),
+-						((R_f - R_T) + f_T_zero));
+-
++				f_e = R_T * t_e + f_T_zero;
+ 				if (f_e > threshold)
+ 					return 1;
+ 			}
+@@ -156,8 +154,7 @@ int predict(unsigned long *frag_vec, struct lsq_struct *lsq)
+ 			t_e = div64_long((f_T_zero - f_f_zero + R_c),
+ 					(R_f + R_c - R_T));
+ 			if (t_e > 1) {
+-				f_e = div64_long(((f_T_zero - f_f_zero + R_c) * R_T) ,
+-						((R_f + R_c - R_T) + f_T_zero));
++				f_e = R_T * t_e + f_T_zero;
+ 				if (f_e > threshold)
+ 					return 1;
+ 			}
+-- 
+1.8.3.1
+
