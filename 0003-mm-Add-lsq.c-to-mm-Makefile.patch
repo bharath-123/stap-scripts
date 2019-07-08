@@ -1,0 +1,28 @@
+From f65a15c7a4989cd0a1274bc86383be4abfdc1a34 Mon Sep 17 00:00:00 2001
+From: Bharath <linux.bhar@gmail.com>
+Date: Mon, 8 Jul 2019 06:07:59 -0600
+Subject: [PATCH 3/4] mm: Add lsq.c to mm/Makefile
+
+This patch adds mm/lsq.c to the mm/Makefile
+
+Signed-off-by: Bharath <linux.bhar@gmail.com>
+---
+ mm/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/Makefile b/mm/Makefile
+index d210cc9..bf4f48b 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -25,7 +25,7 @@ mmu-y			:= nommu.o
+ mmu-$(CONFIG_MMU)	:= gup.o highmem.o memory.o mincore.o \
+ 			   mlock.o mmap.o mmu_gather.o mprotect.o mremap.o \
+ 			   msync.o page_vma_mapped.o pagewalk.o \
+-			   pgtable-generic.o rmap.o vmalloc.o
++			   pgtable-generic.o rmap.o vmalloc.o lsq.o
+ 
+ 
+ ifdef CONFIG_CROSS_MEMORY_ATTACH
+-- 
+1.8.3.1
+
