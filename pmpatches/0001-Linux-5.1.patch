@@ -1,0 +1,25 @@
+From e93c9c99a629c61837d5a7fc2120cd2b6c70dbdd Mon Sep 17 00:00:00 2001
+From: Linus Torvalds <torvalds@linux-foundation.org>
+Date: Sun, 5 May 2019 17:42:58 -0700
+Subject: [PATCH 1/4] Linux 5.1
+
+---
+ Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 633d119..26c92f8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 5
+ PATCHLEVEL = 1
+ SUBLEVEL = 0
+-EXTRAVERSION = -rc7
++EXTRAVERSION =
+ NAME = Shy Crocodile
+ 
+ # *DOCUMENTATION*
+-- 
+1.8.3.1
+

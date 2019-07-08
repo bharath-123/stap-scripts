@@ -1,8 +1,11 @@
-From 715af67df5d6ff825b70d9bd4ba976bf41bdf816 Mon Sep 17 00:00:00 2001
+From f65a15c7a4989cd0a1274bc86383be4abfdc1a34 Mon Sep 17 00:00:00 2001
 From: Bharath <linux.bhar@gmail.com>
-Date: Thu, 4 Jul 2019 05:29:48 -0600
-Subject: [PATCH 5/6] Added lsq.c in mm/Makefile
+Date: Mon, 8 Jul 2019 06:07:59 -0600
+Subject: [PATCH 4/4] mm: Add lsq.c to mm/Makefile
 
+This patch adds mm/lsq.c to the mm/Makefile
+
+Signed-off-by: Bharath <linux.bhar@gmail.com>
 ---
  mm/Makefile | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)

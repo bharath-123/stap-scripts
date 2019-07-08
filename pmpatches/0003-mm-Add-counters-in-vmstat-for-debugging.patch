@@ -1,15 +1,20 @@
-From b8568203da8325b51f8fd0b052f734c0daeae309 Mon Sep 17 00:00:00 2001
+From 2917e9b6044a16b540fb605e0dc6a89d11649b93 Mon Sep 17 00:00:00 2001
 From: Bharath <linux.bhar@gmail.com>
-Date: Thu, 4 Jul 2019 05:30:13 -0600
-Subject: [PATCH 6/6] Added counters for debug info
+Date: Mon, 8 Jul 2019 06:06:18 -0600
+Subject: [PATCH 3/4] mm: Add counters in vmstat for debugging
 
+This patch adds vmstat counters which count the number of times kcompactd is woken
+up and also counts the number of times the predictive algorithm detects a potential
+external fragmentation event.
+
+Signed-off-by: Bharath <linux.bhar@gmail.com>
 ---
  include/linux/vm_event_item.h | 2 ++
  mm/vmstat.c                   | 2 ++
  2 files changed, 4 insertions(+)
 
 diff --git a/include/linux/vm_event_item.h b/include/linux/vm_event_item.h
-index 47a3441..edaa9d5 100644
+index 47a3441..afcd087 100644
 --- a/include/linux/vm_event_item.h
 +++ b/include/linux/vm_event_item.h
 @@ -110,6 +110,8 @@ enum vm_event_item { PGPGIN, PGPGOUT, PSWPIN, PSWPOUT,
