@@ -1,0 +1,25 @@
+From 30dfc5885b480d245f8b824ef44038d4eb5a3397 Mon Sep 17 00:00:00 2001
+From: Bharath <linux.bhar@gmail.com>
+Date: Mon, 8 Jul 2019 06:50:56 -0600
+Subject: [PATCH 0/4] *** SUBJECT HERE ***
+
+*** BLURB HERE ***
+
+Bharath (4):
+  mm: Add Predictive memory logic to the kernel
+  mm: Add counters in vmstat for debugging
+  mm: Add lsq.c to mm/Makefile
+  mm/vmscan.c: Integrate predictive algorithm with kswapd
+
+ include/linux/mmzone.h        |  26 +++++++
+ include/linux/vm_event_item.h |   2 +
+ mm/Makefile                   |   2 +-
+ mm/lsq.c                      | 168 ++++++++++++++++++++++++++++++++++++++++++
+ mm/vmscan.c                   | 150 +++++++++++++++++++++++++++++++------
+ mm/vmstat.c                   |   2 +
+ 6 files changed, 327 insertions(+), 23 deletions(-)
+ create mode 100644 mm/lsq.c
+
+-- 
+1.8.3.1
+
