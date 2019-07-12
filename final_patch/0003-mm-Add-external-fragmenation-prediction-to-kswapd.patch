@@ -1,0 +1,117 @@
+From 06cec340a251010c01219bf62267add3139ecd34 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 11 Jul 2019 23:49:01 -0600
+Subject: [PATCH 3/4] mm: Add external fragmenation prediction to kswapd
+
+We introduce 2 new functions:
+(i) node_potential_frag: This functions takes in the pgdat pointer and classzone_idx.
+It iterates through all the zones and sets the ZONE_POTENTIAL_FRAG flag for all the zones
+that could have a potential fragmentation event. It has to iterate through all the zones
+even if one zone returns true as we need to update the lsq_structs of all the zones
+
+(ii) zone_potential_frag: This function uses the info from zone->free_area and calulates the
+fragmented free memory at a given order which is the sum of occupancies at the lower order.
+
+node_potential_frag is called in prepare_kswapd_sleep to check if the node could have
+a potential fragmentation event which will not let kswapd sleep. This has a higher priority than
+the check for watermarks as a zone could be balanced but could be fragmented.
+
+The idea to reclaim a bit of memory and then wakeup kcompactd.
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ mm/vmscan.c | 69 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index a815f73..ddf6a88 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3405,8 +3405,68 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
+ }
+ 
+ /*
++ * zone_potential_frag checks if there could be a potential fragmentation
++ * event for a particular zone.
++ */
++
++static bool zone_potential_frag(struct zone *zone)
++{
++	unsigned long frag_vec[MAX_ORDER];
++	int order;
++	unsigned long total_free_pages;
++	unsigned long curr_free_pages;
++	bool result;
++
++	total_free_pages = frag_vec[0] = 0;
++	for (order = 0; order < MAX_ORDER; order++) {
++		curr_free_pages = zone->free_area[order].nr_free << order;
++		total_free_pages += curr_free_pages;
++
++		if (order < MAX_ORDER - 1)
++			frag_vec[order + 1] =
++				frag_vec[order] + curr_free_pages;
++	}
++	frag_vec[0] = total_free_pages;
++
++	result = predict(frag_vec, zone->lsq);
++
++	return result;
++}
++
++/*
++ * node_potential_frag checks if a potential future fragmentation event could
++ * be possible for this node.
++ * It returns true if there is potential fragmentation event for this node.
++ */
++
++static bool node_potential_frag(pg_data_t *pgdat, int classzone_idx)
++{
++	struct zone *zone = NULL;
++	int i, potential_frag = 0;
++
++	for (i = 0; i <= classzone_idx; i++) {
++		zone = pgdat->node_zones + i;
++
++		if (!managed_zone(zone))
++			continue;
++
++		if (zone_potential_frag(zone)) {
++			potential_frag = 1;
++			set_bit(ZONE_POTENTIAL_FRAG, &zone->flags);
++		}
++	}
++
++	if (potential_frag)
++		return true;
++
++	return false;
++}
++
++/*
+  * Prepare kswapd for sleeping. This verifies that there are no processes
+  * waiting in throttle_direct_reclaim() and that watermarks have been met.
++ * It also checks if this node could have a potential external fragmentation 
++ * event which could lead to direct reclaim/compaction stalls.
+  *
+  * Returns true if kswapd is ready to sleep
+  */
+@@ -3431,6 +3491,15 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
+ 	/* Hopeless node, leave it to direct reclaim */
+ 	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES)
+ 		return true;
++	/*
++	 * Check whether this node could have a potential external 
++	 * fragmentation event. If we detect a potential external 
++	 * fragmentation event, we don't allow kswapd to sleep and 
++	 * perform compaction at the end of a balance_pgdat run.
++	 */
++
++	if (node_potential_frag(pgdat, classzone_idx))
++		return false;
+ 
+ 	if (pgdat_balanced(pgdat, order, classzone_idx)) {
+ 		clear_pgdat_congested(pgdat);
+-- 
+1.8.3.1
+

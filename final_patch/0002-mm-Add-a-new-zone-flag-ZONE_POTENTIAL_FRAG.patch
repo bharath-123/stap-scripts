@@ -1,0 +1,34 @@
+From 83505010ddc513858f959f05c2bf674695c1498f Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 11 Jul 2019 23:43:18 -0600
+Subject: [PATCH 2/4] mm: Add a new zone flag, ZONE_POTENTIAL_FRAG
+
+This is a preperation patch in which we add a new zone flag,
+ZONE_POTENTIAL_FRAG.
+
+This flag is set for zones which could have a potential external
+fragmentation event as detected by the external fragmentation
+prediction algorithm.
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ include/linux/mmzone.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index f920279..4792ed5 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -555,6 +555,9 @@ enum zone_flags {
+ 	ZONE_BOOSTED_WATERMARK,		/* zone recently boosted watermarks.
+ 					 * Cleared when kswapd is woken.
+ 					 */
++	ZONE_POTENTIAL_FRAG,		/* zone detected with a potential external fragmentation
++					 * event. 
++				         */
+ };
+ 
+ static inline unsigned long zone_managed_pages(struct zone *zone)
+-- 
+1.8.3.1
+

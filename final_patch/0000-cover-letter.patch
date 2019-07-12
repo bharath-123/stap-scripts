@@ -1,0 +1,24 @@
+From fb819998268e946ee87473d1aeaaf5679c12f5d9 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 11 Jul 2019 23:58:20 -0600
+Subject: [PATCH 0/4] *** SUBJECT HERE ***
+
+*** BLURB HERE ***
+
+Bharath Vedartham (4):
+  mm: Add external fragmentation prediction logic
+  mm: Add a new zone flag, ZONE_POTENTIAL_FRAG
+  mm: Add external fragmenation prediction to kswapd
+  mm: Unify watermark boosting and external fragmentation prediction
+    algorithm
+
+ include/linux/mmzone.h |  32 +++++++++++
+ mm/Makefile            |   2 +-
+ mm/lsq.c               | 137 +++++++++++++++++++++++++++++++++++++++++++++
+ mm/vmscan.c            | 147 +++++++++++++++++++++++++++++++++++++++++--------
+ 4 files changed, 294 insertions(+), 24 deletions(-)
+ create mode 100644 mm/lsq.c
+
+-- 
+1.8.3.1
+
