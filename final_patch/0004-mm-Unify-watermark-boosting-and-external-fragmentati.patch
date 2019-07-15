@@ -1,7 +1,7 @@
 From fb819998268e946ee87473d1aeaaf5679c12f5d9 Mon Sep 17 00:00:00 2001
 From: Bharath Vedartham <linux.bhar@gmail.com>
 Date: Thu, 11 Jul 2019 23:54:01 -0600
-Subject: [PATCH 4/4] mm: Unify watermark boosting and external fragmentation
+Subject: [PATCH v2 4/4] mm: Unify watermark boosting and external fragmentation
  prediction algorithm
 
 In balance_pgdat, we unify watermark_boosting and the external fragmentation

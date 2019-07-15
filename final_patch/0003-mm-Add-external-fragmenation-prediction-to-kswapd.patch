@@ -1,7 +1,7 @@
 From 06cec340a251010c01219bf62267add3139ecd34 Mon Sep 17 00:00:00 2001
 From: Bharath Vedartham <linux.bhar@gmail.com>
 Date: Thu, 11 Jul 2019 23:49:01 -0600
-Subject: [PATCH 3/4] mm: Add external fragmenation prediction to kswapd
+Subject: [PATCH v2 3/4] mm: Add external fragmenation prediction to kswapd
 
 We introduce 2 new functions:
 (i) node_potential_frag: This functions takes in the pgdat pointer and classzone_idx.

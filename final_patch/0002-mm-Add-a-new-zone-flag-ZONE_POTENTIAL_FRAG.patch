@@ -1,7 +1,7 @@
 From 83505010ddc513858f959f05c2bf674695c1498f Mon Sep 17 00:00:00 2001
 From: Bharath Vedartham <linux.bhar@gmail.com>
 Date: Thu, 11 Jul 2019 23:43:18 -0600
-Subject: [PATCH 2/4] mm: Add a new zone flag, ZONE_POTENTIAL_FRAG
+Subject: [PATCH v2 2/4] mm: Add a new zone flag, ZONE_POTENTIAL_FRAG
 
 This is a preperation patch in which we add a new zone flag,
 ZONE_POTENTIAL_FRAG.

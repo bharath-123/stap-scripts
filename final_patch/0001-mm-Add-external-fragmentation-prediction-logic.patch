@@ -1,7 +1,7 @@
 From 40d2d643de5cbfb40033bf4dc627db33918125a4 Mon Sep 17 00:00:00 2001
 From: Bharath Vedartham <linux.bhar@gmail.com>
 Date: Thu, 11 Jul 2019 23:42:28 -0600
-Subject: [PATCH 1/4] mm: Add external fragmentation prediction logic
+Subject: [PATCH v2 1/4] mm: Add external fragmentation prediction logic
 
 The new file mm/lsq.c which contains the logic for the external fragmentation
 prediction.
@@ -19,7 +19,8 @@ A new structure lsq_struct is added to the zone structure. The lsq_struct is a p
 and per-order structure which contains information like the current value of sigma(y) and
 sigma(xy) which are used to calculate the least square lines.
 LOOKBACK is the number of steps to lookback to calculate the trends in free memory consumption
-and memory fragmentation.
+and memory fragmentation. TIME_THRESHOLD is the limit below which if the lsq lines
+intersect, kswapd will be woken up again.
 
 Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
 ---

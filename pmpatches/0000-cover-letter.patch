@@ -1,9 +1,62 @@
 From 30dfc5885b480d245f8b824ef44038d4eb5a3397 Mon Sep 17 00:00:00 2001
 From: Bharath <linux.bhar@gmail.com>
 Date: Mon, 8 Jul 2019 06:50:56 -0600
-Subject: [PATCH 0/4] *** SUBJECT HERE ***
+Subject: [PATCH 0/4] Introduce external fragmentation prediction to kswapd
 
-*** BLURB HERE ***
+"""""
+Problem we are trying to solve
+"""""
+
+As systems age, memory begins to get fragmented. This fragmentation causes higher 
+order allocations to fail. Even though there is enough memory to satisfy the allocation,
+There is not enough contiguous memory to satisfy allocations. 
+When there is not enough memory to satisfy allocations, the system goes into direct reclaim/compaction
+which impacts performance. Reduction of these allocation stalls would immensely improve performance which 
+happens to be the main goal of this patch series.
+
+There have been efforts to reduce fragmentation. (i) Kcompactd is called after kswapd reclaims enough memory 
+to balance the node. kswapd goes into a small sleep after balancing the node and then wakes up kcompactd.
+(ii) More recently, watermark boosting as added by Mel Gorman. In this work, the watermarks of a zone
+are boosted by a watermark_boost factor when an external fragmentation event is detected. Kswapd is 
+then woken up explicitly(since the node could be balanced) to reclaim a small amount of memory and then 
+it wakes up kcompactd to perform compaction.  
+( I am not going back to the introduction of compaction, I am mostly talking about methods of
+pre-emptive compaction).
+
+This patch series aims to reduce fragmentation by modelling the trends of memory usage and 
+memory fragmentation(i.e the trend in which memory gets fragmented by) and predict whether a 
+potential external fragmentation event could occur based on these trends. We use the least square 
+formulation to model these trends. More info is in the individual patch changelog and in the code
+comments.
+
+When kswapd decides whether it should sleep or not, we check if a potential external fragmentation
+event could occur based on the above modelled trends. If a potential external fragmentation event
+could occur, we do not allow kswapd to sleep which causes it to execute another run of balance_pgdat.
+In this run of balance_pgdat, we call kcompactd to perform compaction.
+
+This is pre-emptively compacting memory before any sort of fragmentation could occur.
+
+""""
+Numbers
+"""" 
+
+We used Mel Gorman's mmtests workloads. We used the config-io-paralleldd-large-multi workload as 
+it consistently put the system to direct reclaim. We used allocation stalls as the metric to test our
+code. The patches were originally based of v5.1 but it easily applies to v5.2-rc? without any problems.
+
+v5.1:
+allocstall_dma 0
+allocstall_dma32 0
+allocstall_normal 1
+allocstall_movable 321
+
+v5.1-withpredictivememorypatch:
+allocstall_dma 0
+allocstall_dma32 0
+allocstall_normal 0
+allocstall_movable 10
+
+These are fairly significant numbers. The amount of code added is also fairly less(A lot of code is comments).
 
 Bharath (4):
   mm: Add Predictive memory logic to the kernel

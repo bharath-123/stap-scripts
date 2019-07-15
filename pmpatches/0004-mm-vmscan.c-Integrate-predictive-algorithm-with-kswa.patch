@@ -19,9 +19,13 @@ node_potential_frag is called in prepare_kswapd_sleep to check if the node could
 a potential fragmentation event which will not let kswapd sleep. This has a higher priority than
 the check for watermarks as a zone could be balanced but could be fragmented.
 
-balance_pgdat is optimized for cases when kswapd executes balance_pgdat because of a
-potential external fragmentation event. In such runs, suboptimal I/O is not performed and
-kswapd is not worked too hard. These optimizations have been borrowed from Mel Gorman.
+In balance_pgdat, we kind of unify watermark_boosting and the external fragmentation 
+detection algorithm. This is because the intent of both algorithms is the same, to reduce
+external fragmentation by reclaiming a small amount of memory and then waking up kcompactd.
+
+This "unification" is important as there a bunch of optimizations done during such balance_pgdat
+runs like preventing suboptimal I/O and not making kswapd work too hard(by limiting the reclaim
+priority to DEF_PRIORITY - 2).
 
 Signed-off-by: Bharath <linux.bhar@gmail.com>
 ---
@@ -99,7 +103,7 @@ index a815f73..0220137 100644
 +/*
   * Prepare kswapd for sleeping. This verifies that there are no processes
   * waiting in throttle_direct_reclaim() and that watermarks have been met.
-+ * It also checks if this node could have a potential external fragmentation 
++ * It also checks if this node could have a potential external fragmentation
 + * event which could lead to direct reclaim/compaction stalls.
   *
   * Returns true if kswapd is ready to sleep
@@ -109,9 +113,9 @@ index a815f73..0220137 100644
  	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES)
  		return true;
 +	/*
-+	 * Check whether this node could have a potential external 
-+	 * fragmentation event. If we detect a potential external 
-+	 * fragmentation event, we don't allow kswapd to sleep and 
++	 * Check whether this node could have a potential external
++	 * fragmentation event. If we detect a potential external
++	 * fragmentation event, we don't allow kswapd to sleep and
 +	 * perform compaction at the end of a balance_pgdat run.
 +	 */
 +
@@ -133,9 +137,9 @@ index a815f73..0220137 100644
  
  		nr_boost_reclaim += zone->watermark_boost;
  		zone_boosts[i] = zone->watermark_boost;
-+		
++
 +		/*
-+		 * Check if any of the zones could have a potential fragmentation event. 
++		 * Check if any of the zones could have a potential fragmentation event.
 +		 */
 +		if (test_bit(ZONE_POTENTIAL_FRAG, &zone->flags)) {
 +			potential_frag = 1;
@@ -145,7 +149,7 @@ index a815f73..0220137 100644
  	boosted = nr_boost_reclaim;
  
 +	/*
-+	 * If kswapd is woken up because of watermark boosting or forced to run 
++	 * If kswapd is woken up because of watermark boosting or forced to run
 +	 * another balance_pgdat run because it detected an external fragmentation event,
 +	 * we need to compact after reclaiming some pages. need_compact is true if such compaction
 +	 * is required.
@@ -165,8 +169,8 @@ index a815f73..0220137 100644
 +		 * Kswapd can be called when watermarks are boosted or be forced to run
 +		 * balance_pgdat again when a zone is detected with a potential external
 +		 * fragmentation event. If kswapd is running due to watermark boosting
-+		 * or when an external fragmentation event is detected, we don't want to 
-+		 * perform any suboptimal I/O or make kswapd work too hard. This is 
++		 * or when an external fragmentation event is detected, we don't want to
++		 * perform any suboptimal I/O or make kswapd work too hard. This is
 +		 * important from a performance point of view.
 +		 */
 +		bool defrag_run = nr_boost_reclaim || potential_frag;
@@ -183,10 +187,10 @@ index a815f73..0220137 100644
 -		 * on the grounds that the normal reclaim should be enough to
 -		 * re-evaluate if boosting is required when kswapd next wakes.
 +		 * If the pgdat is imbalanced then ignore the deframentatio run. In
-+		 * the case of watermark boosting, preserve the watermarks for 
++		 * the case of watermark boosting, preserve the watermarks for
 +		 * a later time and restart. Note that the zone watermarks will
-+		 * be still reset at the end of balancing on the grounds that the 
-+		 * normal reclaim should be enough to re-evaluate if boosting is 
++		 * be still reset at the end of balancing on the grounds that the
++		 * normal reclaim should be enough to re-evaluate if boosting is
 +		 * required when kswapd next wakes.
  		 */
  		balanced = pgdat_balanced(pgdat, sc.order, classzone_idx);
@@ -256,7 +260,7 @@ index a815f73..0220137 100644
 -		 * pageblocks.
 -		 */
 +	}
-+	
++
 +	/*
 +	 * As there is now likely space, wakeup kcompactd to defragment pageblocks.
 +	 */

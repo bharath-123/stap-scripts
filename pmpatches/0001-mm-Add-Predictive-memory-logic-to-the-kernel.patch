@@ -6,11 +6,26 @@ Subject: [PATCH 1/4] mm: Add Predictive memory logic to the kernel
 This patch adds a new file mm/lsq.c which contains the logic for the predictive memory
 reclaim.
 
+mm/lsq.c samples zone->free_area(frag_vec) to monitor the total available
+free memory and the fraction thereof that, whilst notionally free, requires
+compaction before it can be used.  At any given moment, the difference between
+these two quantities is the amount of memory that is free for immediate use:
+once this is exhausted, subsequent allocations will stall whilst a portion of
+the fragmented memory is compacted.  The program calculates trends for both the
+total and fragmented free memory and, by extrapolation, determines whether
+exhaustion is imminent.
+
 A new structure lsq_struct is added to the zone structure. The lsq_struct is a per-zone
 and per-order structure which contains information like the current value of sigma(y) and
 sigma(xy) which are used to calculate the least square lines.
 LOOKBACK is the number of steps to lookback to calculate the trends in free memory consumption
 and memory fragmentation rate.
+
+There are 2 important variables in the least square formulation.
+(i) R_c which is the compaction rate expressed in pages/s. For now this is set to 2500, which seems
+to work well for certain workloads.
+(ii) threshold : which is the max amount of memory which can lost to fragmentation. This could be a 
+sysctl.
 
 A new zone flag is added, ZONE_POTENTIAL_FRAG. This flag is set when the zone is detected
 with a potential external fragmentation event.
@@ -38,7 +53,7 @@ index fba7741..a4a47a8 100644
 +
 +/*
 + * This is a per zone structure which contains the details to compute a least square line.
-+ * There is one structure for each order. 
++ * There is one structure for each order.
 + */
 +struct lsq_struct {
 +	int slot;
@@ -68,7 +83,7 @@ index fba7741..a4a47a8 100644
  					 * Cleared when kswapd is woken.
  					 */
 +	ZONE_POTENTIAL_FRAG,		/* zone detected with a potential external fragmentation
-+					 * event. 
++					 * event.
 +				         */
  };
  
@@ -86,7 +101,7 @@ index 0000000..49438b0
 +#include <linux/mmzone.h>
 +#include <linux/math64.h>
 +/*
-+ * This is the compaction rate expressed in pages/s. Right now we take a 
++ * This is the compaction rate expressed in pages/s. Right now we take a
 + * default value of 2500
 + */
 +unsigned long R_c = 2500;
@@ -148,26 +163,26 @@ index 0000000..49438b0
 + * order to avert exhaustion of any of the free lists.  Its basis is a simple
 + * model in which the total free memory, f_T, is consumed at a constant rate,
 + * R_T, i.e.
-+ *      
++ *
 + *	f_T(t) = R_T t + f_T(0)
-+ *        
++ *
 + * For any given order, o, members of subordinate lists constitute fragmented
 + * free memory, f_f(o):  the blocks are notionally free but they are unavailable
 + * for allocation.  The fragmented free memory is also assumed to behave
 + * linearly and in the absence of compaction is given by
-+ *             
++ *
 + *	f_f(o, t) = R_f(o) t + f_f(o, 0)
-+ *               
++ *
 + * Compaction is assumed to proceed at a constant rate, R_c, that is independent
 + * of order.
-+ *                  
++ *
 + * It is assumed that all allocations will be made from contiguous memory
 + * meaning that, under net memory pressure and with no change in fragmentation,
 + * f_T will become equal to f_f and subsequent allocations will stall in either
 + * direct compaction or reclaim.  Preemptive compaction will delay the onset of
 + * exhaustion but, to be useful, must begin early enough and must proceed at a
 + * sufficient rate.
-+ *                         
++ *
 + * On each invocation, this function obtains estimates for the parameters
 + * f_T(0), R_T, f_f(o, 0) and R_F(o).  It determines whether, if R_T and R_f(o)
 + * remain constant and compaction begins at the next invocation, f_T(t) and
@@ -177,7 +192,7 @@ index 0000000..49438b0
 + * indicates that compaction should begin now by returning a pointer to the same
 + * structure passed in, now populated with parameters describing the anticipated
 + * exhaustion.  The function returns NULL if no action is needed before the
-+ * start of the next time interval.                              
++ * start of the next time interval.
 + */
 +int predict(unsigned long *frag_vec, struct lsq_struct *lsq)
 +{
