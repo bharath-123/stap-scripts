@@ -1,0 +1,63 @@
+From 48367071a51966f8f962c25bff065f460eb0bc38 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Mon, 15 Jul 2019 12:35:46 -0600
+Subject: [PATCH] staging: kpc2000: Convert put_page() to put_user_page*()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+There have been issues with get_user_pages and filesystem writeback.
+The issues are better described in [1].
+
+The solution being proposed wants to keep track of gup_pinned pages which will allow to take furthur steps to coordinate between subsystems using gup.
+
+put_user_page() simply calls put_page inside for now. But the implementation will change once all call sites of put_page() are converted.
+
+I currently do not have the driver to test. Could I have some suggestions to test this code? The solution is currently implemented in [2] and
+it would be great if we could apply the patch on top of [2] and run some tests to check if any regressions occur.
+
+[1] https://lwn.net/Articles/753027/
+[2] https://github.com/johnhubbard/linux/tree/gup_dma_core
+
+Cc: Matt Sickler <Matt.Sickler@daktronics.com>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Cc: Jérôme Glisse <jglisse@redhat.com>
+Cc: Ira Weiny <ira.weiny@intel.com>
+Cc: John Hubbard <jhubbard@nvidia.com>
+Cc: linux-mm@kvack.org
+Cc: devel@driverdev.osuosl.org
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ drivers/staging/kpc2000/kpc_dma/fileops.c | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/staging/kpc2000/kpc_dma/fileops.c b/drivers/staging/kpc2000/kpc_dma/fileops.c
+index 6166587..82c70e6 100644
+--- a/drivers/staging/kpc2000/kpc_dma/fileops.c
++++ b/drivers/staging/kpc2000/kpc_dma/fileops.c
+@@ -198,9 +198,7 @@ int  kpc_dma_transfer(struct dev_private_data *priv, struct kiocb *kcb, unsigned
+ 	sg_free_table(&acd->sgt);
+  err_dma_map_sg:
+  err_alloc_sg_table:
+-	for (i = 0 ; i < acd->page_count ; i++){
+-		put_page(acd->user_pages[i]);
+-	}
++	put_user_pages(acd->user_pages, acd->page_count);
+  err_get_user_pages:
+ 	kfree(acd->user_pages);
+  err_alloc_userpages:
+@@ -229,9 +227,7 @@ void  transfer_complete_cb(struct aio_cb_data *acd, size_t xfr_count, u32 flags)
+ 	
+ 	dma_unmap_sg(&acd->ldev->pldev->dev, acd->sgt.sgl, acd->sgt.nents, acd->ldev->dir);
+ 	
+-	for (i = 0 ; i < acd->page_count ; i++){
+-		put_page(acd->user_pages[i]);
+-	}
++	put_user_pages(acd->user_pages, acd->page_count);
+ 	
+ 	sg_free_table(&acd->sgt);
+ 	
+-- 
+1.8.3.1
+
