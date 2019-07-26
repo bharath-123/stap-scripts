@@ -1,0 +1,104 @@
+From 03162d30d4307f854485a7ad9ad323d6c1ac914e Mon Sep 17 00:00:00 2001
+From: Khalid Aziz <khalid.aziz@oracle.com>
+Date: Thu, 11 Jul 2019 16:40:01 -0600
+Subject: [PATCH 3/3] mm/lsq.c: Introduce time threshold in predict
+
+predict used a threshold based on number of pages at the point of
+exhaustaion. This can depend on system state and other various factor
+like the working set of the system. Instead use a time threshold
+which is independend of the state of the system.
+
+If we the point of intersection is anywhere in the nearby future or
+just occured in the near past, then don't let kswapd sleep.
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ include/linux/mmzone.h |  2 ++
+ mm/lsq.c               | 45 +++++++++++-------------------------------
+ 2 files changed, 14 insertions(+), 33 deletions(-)
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 44665d7b16d4..e3ba0613b980 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -308,6 +308,8 @@ struct per_cpu_nodestat {
+  */
+ #define LSQ_LOOKBACK 8
+ 
++#define TIME_THRESHOLD	20
++
+ /*
+  * Structure to keep track of current values required to compute the best
+  * fit line using method of least squares
+diff --git a/mm/lsq.c b/mm/lsq.c
+index 85258d2d2983..4836c306d0e9 100644
+--- a/mm/lsq.c
++++ b/mm/lsq.c
+@@ -191,7 +191,7 @@ int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq)
+ 	long long m[MAX_ORDER];
+ 	long long c[MAX_ORDER];
+ 	bool is_ready = true;
+-	long long f_T_zero, R_T, f_f_zero, R_f, t_e, f_e;
++	long long f_T_zero, R_T, f_f_zero, R_f, t_e;
+ 
+ 	for (order = 0; order < MAX_ORDER; order++) {
+ 		if (lsq_fit(&lsq[order], frag_vec[order].free_pages,
+@@ -210,44 +210,23 @@ int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq)
+ 		f_f_zero = c[order];
+ 		R_f = m[order];
+ 
+-		if (f_T_zero <= f_f_zero)
++		/*
++		 * If lines are parallel, then they never intersect.
++		 */
++		if (R_T == R_f)
+ 			continue;
+ 		/*
+-		 * There are two possible reasons to begin reclaim/compaction
+-		 * immediately, i.e. at the beginning of this interval.
+-		 * The first is not doing so would result in exhaustion
+-		 * before the beginning of next interval.
++		 * Find the point of intersection of the two lines
+ 		 */
+-		if (R_f > R_T) {
+-			t_e = div64_long((f_T_zero - f_f_zero),
+-					(R_f - R_T));
+-			if (t_e < 1) {
+-				/*
+-				 * Don't bother compacting if the expected
+-				 * fragmentation improves upon the given
+-				 * threshold.
+-				 */
+-				f_e = R_T * t_e + f_T_zero;
+-				if (f_e > threshold)
+-					return 1;
+-			}
+-		}
++		t_e = div64_long((f_T_zero - f_f_zero), (R_f - R_T));
+ 
+ 		/*
+-		 * The second reason is that deferring reclamation/compaction
+-		 * until the start of next interval would result, at the
+-		 * time of exhaustion, in a surplus of free fragmented memory
+-		 * above the desired threshold.
++		 * If they intersect anytime soon in the future
++		 * or intersected recently in the past, then don't
++		 * let kswapd sleep.
+ 		 */
+-		if (R_T < (R_f + R_c)) {
+-			t_e = div64_long((f_T_zero - f_f_zero + R_c),
+-					(R_f + R_c - R_T));
+-			if (t_e > 1) {
+-				f_e = R_T * t_e + f_T_zero;
+-				if (f_e > threshold)
+-					return 1;
+-			}
+-		}
++		if (t_e < TIME_THRESHOLD && t_e > -TIME_THRESHOLD)
++			return 1;
+ 	}
+ 
+ 	return 0;
+-- 
+2.20.1
+
