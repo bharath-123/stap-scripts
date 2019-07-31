@@ -1,0 +1,126 @@
+From 7406c731a73dc2649d9d63eb870100e2e8c200f0 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Wed, 31 Jul 2019 11:10:02 -0600
+Subject: [PATCH] mm: Track dropped entries.
+
+Track the dropped entries to retrive the original values back
+from the adjusted values.
+
+Convert lsq->x[] to long long as there could be negative values
+due to jiffies wraparound.
+
+Use 64 bit jiffies instead of 32 bit jiffies.
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ include/linux/mmzone.h |  2 +-
+ mm/lsq.c               | 25 +++++++++++++++++++++----
+ mm/vmscan.c            |  2 +-
+ 3 files changed, 23 insertions(+), 6 deletions(-)
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index ea74f32..3418386 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -370,7 +370,7 @@ struct per_cpu_nodestat {
+ struct lsq_struct {
+ 	bool ready;
+ 	int next;
+-	unsigned long x[LSQ_LOOKBACK];
++	long long x[LSQ_LOOKBACK];
+ 	unsigned long y[LSQ_LOOKBACK];
+ };
+ 
+diff --git a/mm/lsq.c b/mm/lsq.c
+index 4836c30..3fae01f 100644
+--- a/mm/lsq.c
++++ b/mm/lsq.c
+@@ -54,6 +54,12 @@
+ static unsigned long threshold;
+ 
+ /*
++ * Keep track of the dropped entries, so that we can regain 
++ * the original values from the adjusted values.
++ */
++static long long dropped_entries[MAX_ORDER];
++
++/*
+  * This function inserts the given value into the list of most recently seen
+  * data and returns the parameters, m and c, of a straight line of the form
+  * y = mx + c that, according to the the method of least squares, fits them
+@@ -63,22 +69,27 @@
+  */
+ static int
+ lsq_fit(struct lsq_struct *lsq, unsigned long new_y, unsigned long new_x,
+-	long long *m, long long *c)
++	long long *m, long long *c, int order)
+ {
+-	unsigned long oldest_x;
++	long long oldest_x;
+ 	unsigned long long sigma_x, sigma_y;
+ 	unsigned long long sigma_xy, sigma_xx;
+ 	long long slope_divisor;
+ 	int i, next;
+ 	bool entry_dropped = false;
++	long long dropped_entry;
+ 
+ 	next = lsq->next++;
+ 	/*
+ 	 * If lookback window is full, drop the oldest values from
+ 	 * the list
+ 	 */
+-	if (lsq->ready)
++	if (lsq->ready) {
+ 		entry_dropped = true;
++		dropped_entry = dropped_entries[order];
++		for (i=0; i<LSQ_LOOKBACK; ++i)
++			lsq->x[i] += dropped_entry;
++	}
+ 
+ 	lsq->x[next] = new_x;
+ 	lsq->y[next] = new_y;
+@@ -92,6 +103,11 @@
+ 			 * entries for time component (x) relative to the
+ 			 * first entry with first entry being set to 0.
+ 			 */
++			/*
++			 * Keep track of oldest_x, so that we can regain 
++			 * the original values back later.
++			 */
++			dropped_entries[order] = oldest_x;
+ 			for (i=0; i<LSQ_LOOKBACK; i++)
+ 				lsq->x[i] -= oldest_x;
+ 		}
+@@ -112,6 +128,7 @@
+ 		 * square(x) later.
+ 		 */
+ 		oldest_x = lsq->x[lsq->next];
++		dropped_entries[order] = oldest_x;
+ 		for (i=0; i<LSQ_LOOKBACK; i++)
+ 			lsq->x[i] -= oldest_x;
+ 	}
+@@ -196,7 +213,7 @@ int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq)
+ 	for (order = 0; order < MAX_ORDER; order++) {
+ 		if (lsq_fit(&lsq[order], frag_vec[order].free_pages,
+ 				frag_vec[order].time, &m[order],
+-				&c[order]) == -1)
++				&c[order], order) == -1)
+ 			is_ready = false;
+ 	}
+ 
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index b2aacc0..9822087 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3419,7 +3419,7 @@ static bool zone_potential_frag(struct zone *zone)
+ 		if (order < MAX_ORDER - 1) {
+ 			frag_vec[order + 1].free_pages =
+ 				frag_vec[order].free_pages + curr_free_pages;
+-			frag_vec[order + 1].time = jiffies_to_msecs(jiffies);
++			frag_vec[order + 1].time = jiffies64_to_msecs(get_jiffies_64());
+ 		}
+ 	}
+ 	frag_vec[0].free_pages = total_free_pages;
+-- 
+1.8.3.1
+
