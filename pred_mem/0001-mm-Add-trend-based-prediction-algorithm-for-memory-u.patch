@@ -1,0 +1,340 @@
+From 54df524c275410011ab6a6559a5f6c2d68c6b03f Mon Sep 17 00:00:00 2001
+From: Khalid Aziz <khalid.aziz@oracle.com>
+Date: Tue, 9 Jul 2019 13:12:21 -0600
+Subject: [PATCH 1/2] mm: Add trend based prediction algorithm for memory usage
+
+Direct page reclamation and compaction have high and unpredictable
+latency costs for applications. This patch adds code to predict if
+system is about to run out of free memory by watching the historical
+memory consumption trends. It computes a best fit line to this
+historical data using method of least squares. it can then compute if
+system will run out of memory if the current trend continues.
+Historical data is held in a new data structure lsq_struct for each
+zone and each order within the zone. Size of the window for historical
+data is given by LSQ_LOOKBACK. Any zone with a possible impending
+fragmentation is marked with a new flag ZONE_POTENTIAL_FRAG.
+
+Signed-off-by: Bharath <linux.bhar@gmail.com>
+Signed-off-by: Khalid Aziz <khalid.aziz@oracle.com>
+Reviewed-by: Vandana BN <bnvandana@gmail.com>
+---
+ include/linux/mmzone.h |  39 +++++++
+ mm/Makefile            |   2 +-
+ mm/lsq.c               | 228 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 268 insertions(+), 1 deletion(-)
+ create mode 100644 mm/lsq.c
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index d77d717c620c..d8e26b71a15f 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -355,6 +355,36 @@ struct per_cpu_nodestat {
+ 
+ #endif /* !__GENERATING_BOUNDS.H */
+ 
++/*
++ * Size of lookback window for the free memory exhaustion prediction
++ * algorithm. Keep it to less than 16 to keep data manageable
++ */
++#define LSQ_LOOKBACK 8
++
++/*
++ * How far forward to look when determining if memory exhaustion would
++ * become an issue.
++ */
++extern unsigned long mempredict_threshold;
++
++/*
++ * Structure to keep track of current values required to compute the best
++ * fit line using method of least squares
++ */
++struct lsq_struct {
++	bool ready;
++	int next;
++	u64 x[LSQ_LOOKBACK];
++	unsigned long y[LSQ_LOOKBACK];
++};
++
++struct frag_info {
++	unsigned long free_pages;
++	unsigned long time;
++};
++
++extern int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq);
++
+ enum zone_type {
+ #ifdef CONFIG_ZONE_DMA
+ 	/*
+@@ -555,6 +585,12 @@ struct zone {
+ 
+ 	bool			contiguous;
+ 
++	/*
++	 * Structures to use for memory consumption prediction for
++	 * each order
++	 */
++	struct lsq_struct	mem_prediction[MAX_ORDER];
++
+ 	ZONE_PADDING(_pad3_)
+ 	/* Zone statistics */
+ 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
+@@ -579,6 +615,9 @@ enum zone_flags {
+ 	ZONE_BOOSTED_WATERMARK,		/* zone recently boosted watermarks.
+ 					 * Cleared when kswapd is woken.
+ 					 */
++	ZONE_POTENTIAL_FRAG,		/* zone detected with a potential
++					 * external fragmentation event.
++					 */
+ };
+ 
+ static inline unsigned long zone_managed_pages(struct zone *zone)
+diff --git a/mm/Makefile b/mm/Makefile
+index 338e528ad436..fb7b3c19dd13 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -39,7 +39,7 @@ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
+ 			   mm_init.o mmu_context.o percpu.o slab_common.o \
+ 			   compaction.o vmacache.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+-			   debug.o gup.o $(mmu-y)
++			   debug.o gup.o lsq.o $(mmu-y)
+ 
+ # Give 'page_alloc' its own module-parameter namespace
+ page-alloc-y := page_alloc.o
+diff --git a/mm/lsq.c b/mm/lsq.c
+new file mode 100644
+index 000000000000..8e896c09b980
+--- /dev/null
++++ b/mm/lsq.c
+@@ -0,0 +1,228 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * lsq.s: Provide a prediction on whether free memory exhaustion is
++ *	imminent or not by using a best fit line based upon method of
++ *	least squares. Best fit line is based upon recent historical
++ *	data. This historical data forms the lookback window for the
++ *	algorithm.
++ *
++ *
++ * Author: Robert Harris
++ * Author: Khalid Aziz <khalid.aziz@oracle.com>
++ *
++ * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++#include <linux/mmzone.h>
++#include <linux/math64.h>
++
++/*
++ * This is the compaction rate expressed in pages/s. Right now we take a
++ * default value of 2500.
++ *
++ * TODO: Make this autotune since compaction rate will vary from machine
++ * to machine
++ */
++static unsigned long R_c = 2500;
++
++/*
++ * How far forward to look when determining if memory exhaustion would
++ * become an issue. The unit for this is same as the unit for the
++ * x-axis of graph where sample points for memory utilization are being
++ * plotted. We start with a default value of 20 units but can tweak it
++ * dynamically to get better prediction results.
++ */
++unsigned long mempredict_threshold = 20;
++
++/*
++ * This function inserts the given value into the list of most recently seen
++ * data and returns the parameters, m and c, of a straight line of the form
++ * y = (mx/100) + c that, according to the the method of least squares
++ * fits them best. This implementation looks at just the last few data points 
++ * (lookback window) which allows for fixed amount of storage required for
++ * data points and a nearly fixed time to calculate best fit line. Using
++ * line equation of the form y=(mx/100)+c instead of y=mx+c allows us to
++ * avoid floating point operations since m can be fractional often.
++ */
++static int
++lsq_fit(struct lsq_struct *lsq, unsigned long new_y, u64 new_x,
++	long long *m, long long *c, int order)
++{
++	u64 oldest_x;
++	u64 sigma_x, sigma_y;
++	u64 sigma_xy, sigma_xx;
++	long long slope_divisor;
++	int i, next;
++	bool entry_dropped = false;
++	u64 x_offset;
++
++	next = lsq->next++;
++	lsq->x[next] = new_x;
++	lsq->y[next] = new_y;
++
++	if (lsq->next == LSQ_LOOKBACK) {
++		lsq->next = 0;
++		/*
++		 * We have filled up the lookback window which means we can
++		 * now generate a reasonable best fit line. Flag we have
++		 * enough data now.
++		 */
++		lsq->ready = true;
++	}
++
++	/*
++	 * If lookback window is not full, do not continue with
++	 * computing slope and intercept of best fit line.
++	 */
++	if (!lsq->ready)
++		return -1;
++
++	/*
++	 * If lookback window is full, we will compute slope and intercept
++	 * for the best fit line. In the process of computing those, we need
++	 * to compute squares of values along x-axis. Sqaure values can be
++	 * large enough to overflow 64-bits if they are large enough to
++	 * begin with. To solve this problem, let us transform the line on
++	 * x-axis so the first point falls at x=0. Since lsq->x is a
++	 * circular buffer, lsq->next points to the oldest entry in this
++	 * buffer.
++	 */
++	x_offset = lsq->x[lsq->next];
++	for (i=0; i<LSQ_LOOKBACK; i++)
++		lsq->x[i] -= x_offset;
++
++	/*
++	 * Lookback window is full, so we can compute slope and intercept
++	 * for the best fit line
++	 */
++	sigma_x = sigma_y = sigma_xy = sigma_xx = 0;
++	for (i=0; i<LSQ_LOOKBACK; i++) {
++		sigma_x += lsq->x[i];
++		sigma_y += lsq->y[i];
++		sigma_xy += (lsq->x[i] * lsq->y[i]);
++		sigma_xx += (lsq->x[i] * lsq->x[i]);
++	}
++
++	/*
++	 * guard against divide-by-zero
++	 */
++	slope_divisor = LSQ_LOOKBACK * sigma_xx - sigma_x * sigma_x;
++	if (slope_divisor == 0)
++		return -1;
++	*m = div64_s64(((LSQ_LOOKBACK * sigma_xy - sigma_x * sigma_y) * 100),
++			slope_divisor);
++
++	*c = div64_long((sigma_y - *m * sigma_x), LSQ_LOOKBACK);
++
++	/*
++	 * Restore original values for x-axis
++	 */
++	for (i=0; i<LSQ_LOOKBACK; ++i)
++		lsq->x[i] += x_offset;
++
++	return 0;
++}
++
++/*
++ * This function determines whether it is necessary to begin
++ * compaction now in order to avert exhaustion of any of the free lists.
++ * Its basis is a simple model in which the total free memory, f_T, is
++ * consumed at a constant rate, R_T, i.e.
++ *
++ *	f_T(t) = R_T * t + f_T(0)
++ *
++ * For any given order, o, members of subordinate lists constitute
++ * fragmented free memory, f_f(o): the blocks are notionally free but
++ * they are unavailable for allocation. The fragmented free memory is
++ * also assumed to behave linearly and in the absence of compaction is
++ * given by
++ *
++ *	f_f(o, t) = R_f(o) t + f_f(o, 0)
++ *
++ * Compaction is assumed to proceed at a constant rate, R_c, that is
++ * independent of order.
++ *
++ * It is assumed that all allocations will be made from contiguous
++ * memory meaning that, under net memory pressure and with no change in
++ * fragmentation, f_T will become equal to f_f and subsequent allocations
++ * will stall in either direct compaction or reclaim. Preemptive compaction
++ * will delay the onset of exhaustion but, to be useful, must begin early
++ * enough and must proceed at a sufficient rate.
++ *
++ * On each invocation, this function obtains estimates for the
++ * parameters f_T(0), R_T, f_f(o, 0) and R_F(o). It determines whether,
++ * if R_T and R_f(o) remain constant and compaction begins at the next
++ * invocation, f_T(t) and f_f(o, t) will intersect in the future at a
++ * point corresponding to a level of free memory above some pre-defined
++ * limit that represents the lowest achievable degree of fragmentation.
++ * If this is the case then the function indicates that compaction should
++ * begin now by returning 1. The function returns 0 if no action is
++ * needed before the start of the next time interval.
++ */
++int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq)
++{
++	int order;
++	long long m[MAX_ORDER];
++	long long c[MAX_ORDER];
++	bool is_ready = true;
++	long long f_T_zero, R_T, f_f_zero, R_f, t_e;
++
++	for (order = 0; order < MAX_ORDER; order++) {
++		if (lsq_fit(&lsq[order], frag_vec[order].free_pages,
++				frag_vec[order].time, &m[order],
++				&c[order], order) == -1)
++			is_ready = false;
++	}
++
++	if (!is_ready)
++		return 0;
++
++	f_T_zero = c[0];
++	R_T = m[0];
++
++	for (order = 1; order < MAX_ORDER; order++) {
++		f_f_zero = c[order];
++		R_f = m[order];
++
++		/*
++		 * If lines are parallel, then they never intersect.
++		 */
++		if (R_T == R_f)
++			continue;
++		/*
++		 * Find the point of intersection of the two lines
++		 */
++		t_e = div64_s64(((f_T_zero - f_f_zero) * 100), (R_f - R_T));
++
++		/*
++		 * If they intersect anytime soon in the future
++		 * or intersected recently in the past, then don't
++		 * let kswapd sleep.
++		 */
++		if ((t_e < mempredict_threshold) &&
++		    (t_e > -mempredict_threshold))
++			return 1;
++	}
++
++	return 0;
++}
+-- 
+2.20.1
+
