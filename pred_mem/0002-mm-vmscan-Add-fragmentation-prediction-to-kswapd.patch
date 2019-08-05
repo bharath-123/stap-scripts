@@ -1,4 +1,4 @@
-From f41cbeee78469d3d5ae6acc2017f5f0b5e26dd06 Mon Sep 17 00:00:00 2001
+From 9c8a4c6f2fa47b01696645d408842cb6eb891931 Mon Sep 17 00:00:00 2001
 From: Khalid Aziz <khalid.aziz@oracle.com>
 Date: Tue, 9 Jul 2019 16:45:21 -0600
 Subject: [PATCH 2/2] mm/vmscan: Add fragmentation prediction to kswapd
@@ -25,11 +25,11 @@ Signed-off-by: Bharath <linux.bhar@gmail.com>
 Signed-off-by: Khalid Aziz <khalid.aziz@oracle.com>
 Tested-by: Vandana BN <bnvandana@gmail.com>
 ---
- mm/vmscan.c | 160 ++++++++++++++++++++++++++++++++++++++++++++--------
- 1 file changed, 136 insertions(+), 24 deletions(-)
+ mm/vmscan.c | 162 ++++++++++++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 138 insertions(+), 24 deletions(-)
 
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 44df66a98f2a..196f5b39a1aa 100644
+index 44df66a98f2a..f104a2fff254 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -51,6 +51,7 @@
@@ -40,7 +40,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
  
  #include <asm/tlbflush.h>
  #include <asm/div64.h>
-@@ -3397,9 +3398,72 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
+@@ -3397,9 +3398,74 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
  	clear_bit(PGDAT_WRITEBACK, &pgdat->flags);
  }
  
@@ -65,7 +65,9 @@ index 44df66a98f2a..196f5b39a1aa 100644
 +		if (order < MAX_ORDER - 1) {
 +			frag_vec[order + 1].free_pages =
 +				frag_vec[order].free_pages + curr_free_pages;
-+			frag_vec[order + 1].time = jiffies64_to_msecs(get_jiffies_64());
++			frag_vec[order + 1].time =
++				jiffies64_to_msecs(get_jiffies_64()
++				- INITIAL_JIFFIES);
 +		}
 +	}
 +	frag_vec[0].free_pages = total_free_pages;
@@ -113,7 +115,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
   *
   * Returns true if kswapd is ready to sleep
   */
-@@ -3424,6 +3488,15 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3424,6 +3490,15 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
  	/* Hopeless node, leave it to direct reclaim */
  	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES)
  		return true;
@@ -129,7 +131,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
  
  	if (pgdat_balanced(pgdat, order, classzone_idx)) {
  		clear_pgdat_congested(pgdat);
-@@ -3498,6 +3571,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3498,6 +3573,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  	unsigned long nr_boost_reclaim;
  	unsigned long zone_boosts[MAX_NR_ZONES] = { 0, };
  	bool boosted;
@@ -138,7 +140,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
  	struct zone *zone;
  	struct scan_control sc = {
  		.gfp_mask = GFP_KERNEL,
-@@ -3524,9 +3599,27 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3524,9 +3601,27 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  
  		nr_boost_reclaim += zone->watermark_boost;
  		zone_boosts[i] = zone->watermark_boost;
@@ -166,7 +168,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
  restart:
  	sc.priority = DEF_PRIORITY;
  	do {
-@@ -3534,6 +3627,19 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3534,6 +3629,19 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  		bool raise_priority = true;
  		bool balanced;
  		bool ret;
@@ -186,7 +188,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
  
  		sc.reclaim_idx = classzone_idx;
  
-@@ -3559,39 +3665,44 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3559,39 +3667,44 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  		}
  
  		/*
@@ -245,7 +247,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
  
  		/*
  		 * Do some background aging of the anon list, to give
-@@ -3645,13 +3756,13 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3645,13 +3758,13 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  		 */
  		nr_reclaimed = sc.nr_reclaimed - nr_reclaimed;
  		nr_boost_reclaim -= min(nr_boost_reclaim, nr_reclaimed);
@@ -264,7 +266,7 @@ index 44df66a98f2a..196f5b39a1aa 100644
  			break;
  
  		if (raise_priority || !nr_reclaimed)
-@@ -3676,13 +3787,14 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3676,13 +3789,14 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  			zone->watermark_boost -= min(zone->watermark_boost, zone_boosts[i]);
  			spin_unlock_irqrestore(&zone->lock, flags);
  		}
