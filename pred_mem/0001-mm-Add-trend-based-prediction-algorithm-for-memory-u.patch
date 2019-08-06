@@ -1,6 +1,6 @@
-From 5cf12449872d6909d40f357aa4cd1b77aa8d38cd Mon Sep 17 00:00:00 2001
-From: Khalid Aziz <khalid.aziz@oracle.com>
-Date: Tue, 9 Jul 2019 13:12:21 -0600
+From 95878ad96405850d8df95c74eaed6c34b2508ebb Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Tue, 6 Aug 2019 12:35:48 -0600
 Subject: [PATCH 1/2] mm: Add trend based prediction algorithm for memory usage
 
 Direct page reclamation and compaction have high and unpredictable
@@ -14,21 +14,20 @@ zone and each order within the zone. Size of the window for historical
 data is given by LSQ_LOOKBACK. Any zone with a possible impending
 fragmentation is marked with a new flag ZONE_POTENTIAL_FRAG.
 
-Signed-off-by: Bharath <linux.bhar@gmail.com>
 Signed-off-by: Khalid Aziz <khalid.aziz@oracle.com>
-Reviewed-by: Vandana BN <bnvandana@gmail.com>
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
 ---
- include/linux/mmzone.h |  43 +++++++
+ include/linux/mmzone.h |  44 ++++++++
  mm/Makefile            |   2 +-
- mm/lsq.c               | 267 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 311 insertions(+), 1 deletion(-)
+ mm/lsq.c               | 277 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 322 insertions(+), 1 deletion(-)
  create mode 100644 mm/lsq.c
 
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
-index d77d717c620c..f30bdd570e8b 100644
+index d77d717..12a5333 100644
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
-@@ -355,6 +355,40 @@ struct per_cpu_nodestat {
+@@ -355,6 +355,38 @@ struct per_cpu_nodestat {
  
  #endif /* !__GENERATING_BOUNDS.H */
  
@@ -64,12 +63,10 @@ index d77d717c620c..f30bdd570e8b 100644
 +#define MEMPREDICT_RECLAIM	0x01
 +#define MEMPREDICT_COMPACT	0x02
 +
-+extern int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq);
-+
  enum zone_type {
  #ifdef CONFIG_ZONE_DMA
  	/*
-@@ -555,6 +589,12 @@ struct zone {
+@@ -555,6 +587,12 @@ struct zone {
  
  	bool			contiguous;
  
@@ -82,7 +79,7 @@ index d77d717c620c..f30bdd570e8b 100644
  	ZONE_PADDING(_pad3_)
  	/* Zone statistics */
  	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
-@@ -579,6 +619,9 @@ enum zone_flags {
+@@ -579,6 +617,9 @@ enum zone_flags {
  	ZONE_BOOSTED_WATERMARK,		/* zone recently boosted watermarks.
  					 * Cleared when kswapd is woken.
  					 */
@@ -92,8 +89,18 @@ index d77d717c620c..f30bdd570e8b 100644
  };
  
  static inline unsigned long zone_managed_pages(struct zone *zone)
+@@ -801,6 +842,9 @@ static inline bool pgdat_is_empty(pg_data_t *pgdat)
+ 
+ #include <linux/memory_hotplug.h>
+ 
++
++extern int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq, struct zone *zone);
++
+ void build_all_zonelists(pg_data_t *pgdat);
+ void wakeup_kswapd(struct zone *zone, gfp_t gfp_mask, int order,
+ 		   enum zone_type classzone_idx);
 diff --git a/mm/Makefile b/mm/Makefile
-index 338e528ad436..fb7b3c19dd13 100644
+index d0b295c..a7796d5 100644
 --- a/mm/Makefile
 +++ b/mm/Makefile
 @@ -39,7 +39,7 @@ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
@@ -107,10 +114,10 @@ index 338e528ad436..fb7b3c19dd13 100644
  page-alloc-y := page_alloc.o
 diff --git a/mm/lsq.c b/mm/lsq.c
 new file mode 100644
-index 000000000000..ed06ea817b7d
+index 0000000..9db41d9
 --- /dev/null
 +++ b/mm/lsq.c
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,277 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * lsq.s: Provide a prediction on whether free memory exhaustion is
@@ -157,7 +164,7 @@ index 000000000000..ed06ea817b7d
 + * plotted. We start with a default value of 20 units but can tweak it
 + * dynamically to get better prediction results.
 + */
-+unsigned long mempredict_threshold = 20;
++unsigned long mempredict_threshold = 6000;
 +
 +/*
 + * Threshold for number of free pages that should trigger reclamation,
@@ -292,7 +299,8 @@ index 000000000000..ed06ea817b7d
 + * begin now by returning 1. The function returns 0 if no action is
 + * needed before the start of the next time interval.
 + */
-+int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq)
++int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq,
++			struct zone *zone)
 +{
 +	int order, retval;
 +	long long m[MAX_ORDER];
@@ -325,6 +333,7 @@ index 000000000000..ed06ea817b7d
 +	R_T = m[0];
 +
 +	retval = 0;
++
 +	/*
 +	 * We now have the trend line for each order page. If the trend
 +	 * line for overall free pages is trending upwards (positive
@@ -332,7 +341,7 @@ index 000000000000..ed06ea817b7d
 +	 * need to compact pages if we are running out of contiguous pages
 +	 * for higher orders.
 +	 */
-+	if (m[0] > 0) {
++	if (R_T > 0) {
 +		for (order = 1; order < MAX_ORDER; order++) {
 +			f_f_zero = c[order];
 +			R_f = m[order];
@@ -345,20 +354,29 @@ index 000000000000..ed06ea817b7d
 +			/*
 +			 * Find the point of intersection of the two lines
 +			 */
-+			t_e = div64_s64(((f_T_zero - f_f_zero) * 100),
-+					(R_f - R_T));
++			t_e = div64_s64((R_T* ((f_T_zero - f_f_zero) * 100)),
++					(R_f - R_T)) + f_T_zero;
 +
++			
++			if (t_e <= low_wmark_pages(zone)) {
++				retval |= MEMPREDICT_COMPACT;
++
++				return retval;
++			}
++
++		//	pr_info("t_e is %lld\n", t_e);
 +			/*
 +			 * If they intersect anytime soon in the future
 +			 * or intersected recently in the past, then it
 +			 * is time for compaction and there is no need
 +			 * to continue evaluating remaining order pages
 +			 */
++			/*
 +			if ((t_e < mempredict_threshold) &&
 +				(t_e > -mempredict_threshold)) {
 +				retval |= MEMPREDICT_COMPACT;
 +				return retval;
-+			}
++			}*/
 +		}
 +	} else {
 +		unsigned long threshold;
@@ -370,14 +388,13 @@ index 000000000000..ed06ea817b7d
 +		 * tuned). If so, start reclamation now to stave
 +		 * off memory exhaustion
 +		 */
-+		threshold = atomic_long_read(&_totalram_pages) *
-+				MEMRECLAMATION_THRESHOLD/100;
-+		if (frag_vec[order].free_pages < threshold)
++		threshold = low_wmark_pages(zone);
++		if (frag_vec[0].free_pages < threshold)
 +			retval |= MEMPREDICT_RECLAIM;
 +	}
 +
 +	return retval;
 +}
 -- 
-2.20.1
+1.8.3.1
 
