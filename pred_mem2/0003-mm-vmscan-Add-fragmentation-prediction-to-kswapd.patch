@@ -1,38 +1,35 @@
-From 7a74a6502f1422b266ea0ed08bda630801b1a1b9 Mon Sep 17 00:00:00 2001
-From: Khalid Aziz <khalid.aziz@oracle.com>
-Date: Tue, 9 Jul 2019 16:45:21 -0600
-Subject: [PATCH 2/2] mm/vmscan: Add fragmentation prediction to kswapd
-To: linux.bhar@gmail.com,
-    bnvandana@gmail.com
+From e905606edd78f7dde4466ded6ee69cb96cb2d059 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Mon, 12 Aug 2019 10:22:07 -0600
+Subject: [PATCH 3/3] mm/vmscan: Add fragmentation prediction to kswapd
 
 This patch adds proactive memory reclamation to kswapd using the
 free page exhaustion/fragmentation prediction based upon memory
-consumption trend. It uses the least squares fit algorith introduced
+consumption trend. It uses the least squares fit algorithm introduced
 earlier for this prediction. A new function node_trend_analysis()
 iterates through all zones and updates trend data in the lookback
-window for least square fit algorithm. At the same time it flags any
-zones that have potential for exhaustion/fragmentation by setting
-ZONE_POTENTIAL_FRAG flag.
+window for least square fit algorithm.
 
 prepare_kswapd_sleep() calls node_trend_analysis() to check if the
-node has potential exhaustion/fragmentation. If so, kswapd will
-continue reclamataion. balance_pgdat has been modified to take
-potential fragmentation into account when deciding when to wake
-kcompactd up.
+node has potential exhaustion/fragmentation. If there is an exhaustion
+event(indicated by MEMPREDICT_RECLAIM), it allows kswapd to continue
+reclaimation. If there is a fragmentation event(indicated by
+MEMPREDICT_COMPACT), kswapd sleep to allow kcompactd to do work. We
+boost the watermarks in both exhaustion and fragmentation cases.
 
+Tested-by: Vandana BN <bnvandana@gmail.com>
 Signed-off-by: Khalid Aziz <khalid.aziz@oracle.com>
 Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
-Tested-by: Vandana BN <bnvandana@gmail.com>
 ---
- include/linux/mmzone.h |   9 ++++
- mm/vmscan.c            | 113 ++++++++++++++++++++++++++++++++++++++---
- 2 files changed, 116 insertions(+), 6 deletions(-)
+ include/linux/mmzone.h |  6 +++
+ mm/vmscan.c            | 84 ++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 87 insertions(+), 3 deletions(-)
 
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
-index 9a0e5cab7171..2a512787d3de 100644
+index 84c6772a19b5..ee0ff632d4c0 100644
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
-@@ -587,6 +587,12 @@ struct zone {
+@@ -589,6 +589,12 @@ struct zone {
  
  	bool			contiguous;
  
@@ -45,18 +42,8 @@ index 9a0e5cab7171..2a512787d3de 100644
  	ZONE_PADDING(_pad3_)
  	/* Zone statistics */
  	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
-@@ -611,6 +617,9 @@ enum zone_flags {
- 	ZONE_BOOSTED_WATERMARK,		/* zone recently boosted watermarks.
- 					 * Cleared when kswapd is woken.
- 					 */
-+	ZONE_POTENTIAL_FRAG,		/* zone detected with a potential
-+					 * external fragmentation event.
-+					 */
- };
- 
- extern int mem_predict(struct frag_info *frag_vec, struct zone *zone);
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 44df66a98f2a..f504f51a16f1 100644
+index dbdc46a84f63..202a36f0ab1e 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -51,6 +51,7 @@
@@ -67,7 +54,7 @@ index 44df66a98f2a..f504f51a16f1 100644
  
  #include <asm/tlbflush.h>
  #include <asm/div64.h>
-@@ -3397,14 +3398,79 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
+@@ -3404,14 +3405,77 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
  	clear_bit(PGDAT_WRITEBACK, &pgdat->flags);
  }
  
@@ -122,10 +109,8 @@ index 44df66a98f2a..f504f51a16f1 100644
 +		 * Check if trend analysis shows potential fragmentation
 +		 * in near future
 +		 */
-+		retval = zone_trend_analysis(zone);
-+		if (retval & MEMPREDICT_COMPACT)
-+			set_bit(ZONE_POTENTIAL_FRAG, &zone->flags);
-+		if (retval & MEMPREDICT_RECLAIM)
++		retval |= zone_trend_analysis(zone);
++		if (retval)
 +			boost_watermark(zone);
 +	}
 +
@@ -147,7 +132,7 @@ index 44df66a98f2a..f504f51a16f1 100644
  	/*
  	 * The throttled processes are normally woken up in balance_pgdat() as
  	 * soon as allow_direct_reclaim() is true. But there is a potential
-@@ -3425,6 +3491,21 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3432,6 +3496,21 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
  	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES)
  		return true;
  
@@ -169,44 +154,7 @@ index 44df66a98f2a..f504f51a16f1 100644
  	if (pgdat_balanced(pgdat, order, classzone_idx)) {
  		clear_pgdat_congested(pgdat);
  		return true;
-@@ -3498,6 +3579,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
- 	unsigned long nr_boost_reclaim;
- 	unsigned long zone_boosts[MAX_NR_ZONES] = { 0, };
- 	bool boosted;
-+	bool potential_frag = 0;
-+	bool need_compact;
- 	struct zone *zone;
- 	struct scan_control sc = {
- 		.gfp_mask = GFP_KERNEL,
-@@ -3524,9 +3607,27 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
- 
- 		nr_boost_reclaim += zone->watermark_boost;
- 		zone_boosts[i] = zone->watermark_boost;
-+
-+		/*
-+		 * Check if any of the zones could have a potential
-+		 * fragmentation event.
-+		 */
-+		if (test_bit(ZONE_POTENTIAL_FRAG, &zone->flags)) {
-+			potential_frag = 1;
-+			clear_bit(ZONE_POTENTIAL_FRAG, &zone->flags);
-+		}
- 	}
- 	boosted = nr_boost_reclaim;
- 
-+	/*
-+	 * If kswapd is woken up because of watermark boosting or forced
-+	 * to run another balance_pgdat run because it detected an
-+	 * external fragmentation event, run compaction after
-+	 * reclaiming some pages. need_compact is true if such compaction
-+	 * is required.
-+	 */
-+	need_compact = boosted || potential_frag;
-+
- restart:
- 	sc.priority = DEF_PRIORITY;
- 	do {
-@@ -3645,7 +3746,6 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+@@ -3652,7 +3731,6 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  		 */
  		nr_reclaimed = sc.nr_reclaimed - nr_reclaimed;
  		nr_boost_reclaim -= min(nr_boost_reclaim, nr_reclaimed);
@@ -214,26 +162,17 @@ index 44df66a98f2a..f504f51a16f1 100644
  		/*
  		 * If reclaim made no progress for a boost, stop reclaim as
  		 * IO cannot be queued and it could be an infinite loop in
-@@ -3676,13 +3776,14 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
- 			zone->watermark_boost -= min(zone->watermark_boost, zone_boosts[i]);
- 			spin_unlock_irqrestore(&zone->lock, flags);
+@@ -3685,8 +3763,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
  		}
-+	}
  
--		/*
+ 		/*
 -		 * As there is now likely space, wakeup kcompact to defragment
 -		 * pageblocks.
--		 */
-+	/*
-+	 * As there is now likely space, wakeup kcompactd to defragment
-+	 * pageblocks.
-+	 */
-+	if (need_compact)
++		 * As there is now likely space, wakeup kcompactd to defragment
++		 * pageblocks
+ 		 */
  		wakeup_kcompactd(pgdat, pageblock_order, classzone_idx);
--	}
- 
- 	snapshot_refaults(NULL, pgdat);
- 	__fs_reclaim_release();
+ 	}
 -- 
-2.20.1
+2.17.1
 
