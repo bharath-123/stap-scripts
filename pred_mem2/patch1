@@ -6,21 +6,20 @@ historical data using method of least squares. it can then compute if
 system will run out of memory if the current trend continues.
 Historical data is held in a new data structure lsq_struct for each
 zone and each order within the zone. Size of the window for historical
-data is given by LSQ_LOOKBACK. Any zone with a possible impending
-fragmentation is marked with a new flag ZONE_POTENTIAL_FRAG.
+data is given by LSQ_LOOKBACK.
 
 Signed-off-by: Khalid Aziz <khalid.aziz@oracle.com>
-Signed-off-by: Bharath <linux.bhar@gmail.com>
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
 Reviewed-by: Vandana BN <bnvandana@gmail.com>
 ---
- include/linux/mmzone.h |  43 +++++++
+ include/linux/mmzone.h |  34 +++++
  mm/Makefile            |   2 +-
- mm/lsq.c               | 267 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 311 insertions(+), 1 deletion(-)
+ mm/lsq.c               | 273 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 308 insertions(+), 1 deletion(-)
  create mode 100644 mm/lsq.c
 
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
-index d77d717c620c..645c0b72e23c 100644
+index d77d717c620c..9a0e5cab7171 100644
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
 @@ -355,6 +355,38 @@ struct per_cpu_nodestat {
@@ -62,29 +61,11 @@ index d77d717c620c..645c0b72e23c 100644
  enum zone_type {
  #ifdef CONFIG_ZONE_DMA
  	/*
-@@ -555,6 +587,12 @@ struct zone {
- 
- 	bool			contiguous;
- 
-+	/*
-+	 * Structures to use for memory consumption prediction for
-+	 * each order
-+	 */
-+	struct lsq_struct	mem_prediction[MAX_ORDER];
-+
- 	ZONE_PADDING(_pad3_)
- 	/* Zone statistics */
- 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
-@@ -579,8 +617,13 @@ enum zone_flags {
- 	ZONE_BOOSTED_WATERMARK,		/* zone recently boosted watermarks.
- 					 * Cleared when kswapd is woken.
+@@ -581,6 +613,8 @@ enum zone_flags {
  					 */
-+	ZONE_POTENTIAL_FRAG,		/* zone detected with a potential
-+					 * external fragmentation event.
-+					 */
  };
  
-+extern int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq);
++extern int mem_predict(struct frag_info *frag_vec, struct zone *zone);
 +
  static inline unsigned long zone_managed_pages(struct zone *zone)
  {
@@ -104,13 +85,13 @@ index 338e528ad436..fb7b3c19dd13 100644
  page-alloc-y := page_alloc.o
 diff --git a/mm/lsq.c b/mm/lsq.c
 new file mode 100644
-index 000000000000..8d99c1904870
+index 000000000000..6005a2b2f44d
 --- /dev/null
 +++ b/mm/lsq.c
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,273 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * lsq.s: Provide a prediction on whether free memory exhaustion is
++ * lsq.c: Provide a prediction on whether free memory exhaustion is
 + *	imminent or not by using a best fit line based upon method of
 + *	least squares. Best fit line is based upon recent historical
 + *	data. This historical data forms the lookback window for the
@@ -133,10 +114,6 @@ index 000000000000..8d99c1904870
 + * version 2 for more details (a copy is included in the LICENSE file that
 + * accompanied this code).
 + *
-+ * You should have received a copy of the GNU General Public License version
-+ * 2 along with this work; if not, write to the Free Software Foundation,
-+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
-+ *
 + * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
 + * or visit www.oracle.com if you need additional information or have any
 + * questions.
@@ -148,13 +125,16 @@ index 000000000000..8d99c1904870
 +#include <linux/math64.h>
 +
 +/*
-+ * How far forward to look when determining if memory exhaustion would
++ * How far forward to look when determining if fragmentation would
 + * become an issue. The unit for this is same as the unit for the
 + * x-axis of graph where sample points for memory utilization are being
-+ * plotted. We start with a default value of 20 units but can tweak it
-+ * dynamically to get better prediction results.
++ * plotted. We start with a default value of 1000 units but can tweak it
++ * dynamically to get better prediction results. With data points for
++ * memory being gathered with granularity of milliseconds, this translates
++ * to a look ahead of 1 second. If system is 1 second away from severe
++ * fragmentation, start compaction now to avoid direct comapction.
 + */
-+unsigned long mempredict_threshold = 200;
++unsigned long mempredict_threshold = 1000;
 +
 +/*
 + * Threshold for number of free pages that should trigger reclamation,
@@ -166,7 +146,7 @@ index 000000000000..8d99c1904870
 + * This function inserts the given value into the list of most recently seen
 + * data and returns the parameters, m and c, of a straight line of the form
 + * y = (mx/100) + c that, according to the the method of least squares
-+ * fits them best. This implementation looks at just the last few data points 
++ * fits them best. This implementation looks at just the last few data points
 + * (lookback window) which allows for fixed amount of storage required for
 + * data points and a nearly fixed time to calculate best fit line. Using
 + * line equation of the form y=(mx/100)+c instead of y=mx+c allows us to
@@ -189,9 +169,9 @@ index 000000000000..8d99c1904870
 +	if (lsq->next == LSQ_LOOKBACK) {
 +		lsq->next = 0;
 +		/*
-+		 * We have filled up the lookback window which means we can
-+		 * now generate a reasonable best fit line. Flag we have
-+		 * enough data now.
++		 * Lookback window is fill which means a reasonable
++		 * best fit line can be computed. Flag enough data
++		 * is available in lookback window now.
 +		 */
 +		lsq->ready = true;
 +	}
@@ -204,25 +184,25 @@ index 000000000000..8d99c1904870
 +		return -1;
 +
 +	/*
-+	 * If lookback window is full, we will compute slope and intercept
++	 * If lookback window is full, compute slope and intercept
 +	 * for the best fit line. In the process of computing those, we need
 +	 * to compute squares of values along x-axis. Sqaure values can be
 +	 * large enough to overflow 64-bits if they are large enough to
-+	 * begin with. To solve this problem, let us transform the line on
++	 * begin with. To solve this problem, transform the line on
 +	 * x-axis so the first point falls at x=0. Since lsq->x is a
 +	 * circular buffer, lsq->next points to the oldest entry in this
 +	 * buffer.
 +	 */
 +	x_offset = lsq->x[lsq->next];
-+	for (i=0; i<LSQ_LOOKBACK; i++)
++	for (i = 0; i < LSQ_LOOKBACK; i++)
 +		lsq->x[i] -= x_offset;
 +
 +	/*
-+	 * Lookback window is full, so we can compute slope and intercept
++	 * Lookback window is full. Compute slope and intercept
 +	 * for the best fit line
 +	 */
 +	sigma_x = sigma_y = sigma_xy = sigma_xx = 0;
-+	for (i=0; i<LSQ_LOOKBACK; i++) {
++	for (i = 0; i < LSQ_LOOKBACK; i++) {
 +		sigma_x += lsq->x[i];
 +		sigma_y += lsq->y[i];
 +		sigma_xy += (lsq->x[i] * lsq->y[i]);
@@ -243,7 +223,7 @@ index 000000000000..8d99c1904870
 +	/*
 +	 * Restore original values for x-axis
 +	 */
-+	for (i=0; i<LSQ_LOOKBACK; ++i)
++	for (i = 0; i < LSQ_LOOKBACK; ++i)
 +		lsq->x[i] += x_offset;
 +
 +	return 0;
@@ -254,14 +234,12 @@ index 000000000000..8d99c1904870
 + * reclamation/compaction now in order to avert exhaustion of any of the
 + * free lists.
 + *
-+ * NOTE: Explanation below needs to be updated/clarified
-+ *
 + * Its basis is a simple model in which the total free memory, f_T, is
 + * consumed at a constant rate, R_T, i.e.
 + *
 + *	f_T(t) = R_T * t + f_T(0)
 + *
-+ * For any given order, o, members of subordinate lists constitute
++ * For any given order, o > 0, members of subordinate lists constitute
 + * fragmented free memory, f_f(o): the blocks are notionally free but
 + * they are unavailable for allocation. The fragmented free memory is
 + * also assumed to behave linearly and in the absence of compaction is
@@ -269,8 +247,8 @@ index 000000000000..8d99c1904870
 + *
 + *	f_f(o, t) = R_f(o) t + f_f(o, 0)
 + *
-+ * Compaction is assumed to proceed at a constant rate, R_c, that is
-+ * independent of order.
++ * Order 0 function represents current trend line for total free pages
++ * instead.
 + *
 + * It is assumed that all allocations will be made from contiguous
 + * memory meaning that, under net memory pressure and with no change in
@@ -280,22 +258,20 @@ index 000000000000..8d99c1904870
 + * enough and must proceed at a sufficient rate.
 + *
 + * On each invocation, this function obtains estimates for the
-+ * parameters f_T(0), R_T, f_f(o, 0) and R_F(o). It determines whether,
-+ * if R_T and R_f(o) remain constant and compaction begins at the next
-+ * invocation, f_T(t) and f_f(o, t) will intersect in the future at a
-+ * point corresponding to a level of free memory above some pre-defined
-+ * limit that represents the lowest achievable degree of fragmentation.
-+ * If this is the case then the function indicates that compaction should
-+ * begin now by returning 1. The function returns 0 if no action is
-+ * needed before the start of the next time interval.
++ * parameters f_T(0), R_T, f_f(o, 0) and R_f(o). Using the best fit
++ * line, it then determines if reclamation or compaction should be started
++ * now to avert free pages exhaustion or severe fragmentation. Return value
++ * is a set of bits which represent which condition has been observed -
++ * potential free memory exhaustion, and potential severe fragmentation.
 + */
-+int mem_predict(struct frag_info *frag_vec, struct lsq_struct *lsq)
++int mem_predict(struct frag_info *frag_vec, struct zone *zone)
 +{
-+	int order, retval;
++	int order, retval = 0;
 +	long long m[MAX_ORDER];
 +	long long c[MAX_ORDER];
 +	bool is_ready = true;
-+	long long f_T_zero, R_T, f_f_zero, R_f, t_e;
++	long long x_cross;
++	struct lsq_struct *lsq = zone->mem_prediction;
 +
 +	/*
 +	 * Compute the trend line for fragmentation on each order page.
@@ -304,7 +280,7 @@ index 000000000000..8d99c1904870
 +	 * shows loss/gain of pages of that order. When the trend line
 +	 * for example for order n pages intersects with trend line for
 +	 * total free pages, it means all available pages are of order
-+	 * (n-1) or lower and we have 100% fragmentation of order n
++	 * (n-1) or lower and there is 100% fragmentation of order n
 +	 * pages. Kernel must compact pages at this point to gain
 +	 * new order n pages.
 +	 */
@@ -318,41 +294,42 @@ index 000000000000..8d99c1904870
 +	if (!is_ready)
 +		return 0;
 +
-+	f_T_zero = c[0];
-+	R_T = m[0];
-+
-+	retval = 0;
 +	/*
-+	 * We now have the trend line for each order page. If the trend
++	 * Trend line for each order page is available now. If the trend
 +	 * line for overall free pages is trending upwards (positive
 +	 * slope), there is no need to reclaim pages but there may be
-+	 * need to compact pages if we are running out of contiguous pages
++	 * need to compact pages if system is running out of contiguous pages
 +	 * for higher orders.
 +	 */
-+	if (m[0] > 0) {
++	if (m[0] >= 0) {
 +		for (order = 1; order < MAX_ORDER; order++) {
-+			f_f_zero = c[order];
-+			R_f = m[order];
-+
 +			/*
 +			 * If lines are parallel, then they never intersect.
 +			 */
-+			if (R_T == R_f)
++			if (m[0] == m[order])
 +				continue;
 +			/*
-+			 * Find the point of intersection of the two lines
++			 * Find the point of intersection of the two lines.
++			 * The point of intersection represents 100%
++			 * fragmentation for this order.
 +			 */
-+			t_e = div64_s64(((f_T_zero - f_f_zero) * 100),
-+					(R_f - R_T));
++			x_cross = div64_s64(((c[0] - c[order]) * 100),
++					(m[order] - m[0]));
 +
 +			/*
 +			 * If they intersect anytime soon in the future
 +			 * or intersected recently in the past, then it
 +			 * is time for compaction and there is no need
 +			 * to continue evaluating remaining order pages
++			 *
++			 * TODO: Instead of a fixed time threshold,
++			 * track compaction rate on the system and compute
++			 * how soon should compaction be started with the
++			 * current compaction rate to avoid direct
++			 * compaction
 +			 */
-+			if ((t_e < mempredict_threshold) &&
-+				(t_e > -mempredict_threshold)) {
++			if ((x_cross < mempredict_threshold) &&
++				(x_cross > -mempredict_threshold)) {
 +				retval |= MEMPREDICT_COMPACT;
 +				return retval;
 +			}
@@ -362,13 +339,23 @@ index 000000000000..8d99c1904870
 +
 +		/*
 +		 * Trend line for overall free pages is showing a
-+		 * negative trend. Check if we have less than threshold
-+		 * pages free (NOTE: This number should be dynamically
-+		 * tuned). If so, start reclamation now to stave
++		 * negative trend. Check if less than threshold
++		 * pages are free. If so, start reclamation now to stave
 +		 * off memory exhaustion
++		 *
++		 * TODO: This is not the best way to use trend analysis.
++		 * The right way to determine if it is time to start
++		 * reclamation to avoid memory exhaustion is to compute
++		 * how far away is exhaustion (least square fit
++		 * line can provide that) and what is the average rate of
++		 * memory reclamation. Using those two rates, compute how
++		 * far in advance of exhaustion should reclamation be
++		 * started to avoid exhaustion. This can be done after
++		 * additional code has been added to keep track of current
++		 * rate of reclamation.
 +		 */
-+		threshold = atomic_long_read(&_totalram_pages) *
-+				MEMRECLAMATION_THRESHOLD/100;
++		threshold = (zone_managed_pages(zone)*MEMRECLAMATION_THRESHOLD)
++				/100;
 +		if (frag_vec[0].free_pages < threshold)
 +			retval |= MEMPREDICT_RECLAIM;
 +	}
