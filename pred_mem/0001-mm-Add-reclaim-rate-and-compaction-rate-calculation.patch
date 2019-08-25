@@ -1,0 +1,199 @@
+From 82185ea77945001dd330f8776d514471d89e9e43 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Sun, 25 Aug 2019 09:53:45 +0530
+Subject: [PATCH] mm: Add reclaim rate and compaction rate calculation
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ include/linux/mmzone.h | 61 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ mm/compaction.c        | 13 +++++++++++
+ mm/vmscan.c            | 14 +++++++++---
+ 3 files changed, 84 insertions(+), 4 deletions(-)
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index a523476..0dbca05 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -622,7 +622,7 @@ enum zone_flags {
+ 					 */
+ };
+ 
+-extern int mem_predict(struct frag_info *frag_vec, struct zone *zone);
++extern int mem_predict(struct frag_info *frag_vec, struct zone *zone, struct pglist_data *pgdat);
+ 
+ static inline unsigned long zone_managed_pages(struct zone *zone)
+ {
+@@ -719,6 +719,15 @@ struct zonelist {
+ extern struct page *mem_map;
+ #endif
+ 
++#define RATE_LOOKBACK 8
++
++struct rate_stats {
++	unsigned long rate_lookback[RATE_LOOKBACK];
++	bool ready;
++	int next;
++	unsigned long sum;
++};
++
+ /*
+  * On NUMA machines, each NUMA node would have a pg_data_t to describe
+  * it's memory layout. On UMA machines there is a single pglist_data which
+@@ -808,6 +817,12 @@ typedef struct pglist_data {
+ 
+ 	unsigned long		flags;
+ 
++	unsigned long		reclaim_rate;
++	unsigned long		compaction_rate;
++
++	struct rate_stats	reclaim_states;
++	struct rate_stats	compaction_states;
++
+ 	ZONE_PADDING(_pad2_)
+ 
+ 	/* Per-node vmstats */
+@@ -827,6 +842,50 @@ typedef struct pglist_data {
+ #define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
+ #define node_end_pfn(nid) pgdat_end_pfn(NODE_DATA(nid))
+ 
++static inline void update_reclaim_rate(struct pglist_data *pgdat, unsigned long reclaim_rate)
++{
++	int next;
++
++	next = pgdat->reclaim_states.next++;	
++	pgdat->reclaim_states.rate_lookback[next] = reclaim_rate;
++	
++	pgdat->reclaim_states.sum += reclaim_rate;
++	
++	if (pgdat->reclaim_states.next == RATE_LOOKBACK) {
++		pgdat->reclaim_states.next = 0;
++		pgdat->reclaim_states.ready = true;
++	}
++
++	if (!pgdat->reclaim_states.ready) 
++		return ;
++
++	pgdat->reclaim_rate = pgdat->reclaim_states.sum / RATE_LOOKBACK;
++
++	pgdat->reclaim_states.sum -= (pgdat->reclaim_states.rate_lookback[pgdat->reclaim_states.next]);
++}
++
++static inline void update_compaction_rate(struct pglist_data *pgdat, unsigned long compaction_rate)
++{
++	int next;
++
++	next = pgdat->compaction_states.next++;
++	pgdat->compaction_states.rate_lookback[next] = compaction_rate;
++
++	pgdat->compaction_states.sum += compaction_rate;
++	
++	if (pgdat->compaction_states.next == RATE_LOOKBACK) {
++		pgdat->compaction_states.next = 0;
++		pgdat->compaction_states.ready = true;
++	}
++
++	if (!pgdat->compaction_states.ready) 
++		return ;
++
++	pgdat->compaction_rate = pgdat->compaction_states.sum / RATE_LOOKBACK;
++
++	pgdat->compaction_states.sum -= (pgdat->compaction_states.rate_lookback[pgdat->compaction_states.next]);
++}
++
+ static inline struct lruvec *node_lruvec(struct pglist_data *pgdat)
+ {
+ 	return &pgdat->lruvec;
+diff --git a/mm/compaction.c b/mm/compaction.c
+index 952dc2f..f1851b4 100644
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -2536,6 +2536,9 @@ static void kcompactd_do_work(pg_data_t *pgdat)
+ 		.ignore_skip_hint = false,
+ 		.gfp_mask = GFP_KERNEL,
+ 	};
++	unsigned long start = get_jiffies_64();
++	unsigned long end;
++	unsigned long migrated_pages = 0;
+ 	trace_mm_compaction_kcompactd_wake(pgdat->node_id, cc.order,
+ 							cc.classzone_idx);
+ 	count_compact_event(KCOMPACTD_WAKE);
+@@ -2589,6 +2592,8 @@ static void kcompactd_do_work(pg_data_t *pgdat)
+ 		count_compact_events(KCOMPACTD_FREE_SCANNED,
+ 				     cc.total_free_scanned);
+ 
++		migrated_pages += cc.total_migrate_scanned;
++
+ 		VM_BUG_ON(!list_empty(&cc.freepages));
+ 		VM_BUG_ON(!list_empty(&cc.migratepages));
+ 	}
+@@ -2602,6 +2607,14 @@ static void kcompactd_do_work(pg_data_t *pgdat)
+ 		pgdat->kcompactd_max_order = 0;
+ 	if (pgdat->kcompactd_classzone_idx >= cc.classzone_idx)
+ 		pgdat->kcompactd_classzone_idx = pgdat->nr_zones - 1;
++	
++	end = get_jiffies_64();
++
++	if (start != end && migrated_pages) {
++		unsigned long compaction_rate = migrated_pages / jiffies64_to_msecs(end - start);
++		update_compaction_rate(pgdat, compaction_rate);
++	}
++
+ }
+ 
+ void wakeup_kcompactd(pg_data_t *pgdat, int order, int classzone_idx)
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index ab64696..2e394ec 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3401,7 +3401,7 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
+  * Update  trend data and perform trend analysis for a zone to foresee
+  * a low memory or severe fragmentation event
+  */
+-static int zone_trend_analysis(struct zone *zone)
++static int zone_trend_analysis(struct zone *zone, pg_data_t *pgdat)
+ {
+ 	struct frag_info frag_vec[MAX_ORDER];
+ 	int order, result;
+@@ -3424,7 +3424,7 @@ static int zone_trend_analysis(struct zone *zone)
+ 	frag_vec[0].free_pages = total_free_pages;
+ 	frag_vec[0].time = frag_vec[MAX_ORDER - 1].time;
+ 
+-	result = mem_predict(frag_vec, zone);
++	result = mem_predict(frag_vec, zone, pgdat);
+ 
+ 	return result;
+ }
+@@ -3450,7 +3450,7 @@ static int node_trend_analysis(pg_data_t *pgdat, int classzone_idx)
+ 		 * Check if trend analysis shows potential fragmentation
+ 		 * in near future
+ 		 */
+-		zoneval = zone_trend_analysis(zone);
++		zoneval = zone_trend_analysis(zone, pgdat);
+ 		if (zoneval & MEMPREDICT_COMPACT)
+ 			set_bit(ZONE_POTENTIAL_FRAG, &zone->flags);
+ 		if (zoneval & MEMPREDICT_RECLAIM)
+@@ -3589,6 +3589,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 		.order = order,
+ 		.may_unmap = 1,
+ 	};
++	unsigned long start = get_jiffies_64();
++	unsigned long end;
+ 
+ 	set_task_reclaim_state(current, &sc.reclaim_state);
+ 	psi_memstall_enter(&pflags);
+@@ -3791,6 +3793,12 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 	psi_memstall_leave(&pflags);
+ 	set_task_reclaim_state(current, NULL);
+ 
++	end = get_jiffies_64();
++
++	if (start != end && sc.nr_reclaimed) {
++		unsigned long reclaim_rate = (sc.nr_reclaimed) / jiffies64_to_msecs(end - start);
++		update_reclaim_rate(pgdat, reclaim_rate);
++	}
+ 	/*
+ 	 * Return the order kswapd stopped reclaiming at as
+ 	 * prepare_kswapd_sleep() takes it into account. If another caller
+-- 
+2.7.4
+
