@@ -1,0 +1,23 @@
+From 854ad04f20c848c3388489df655e89d8550f996f Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 29 Aug 2019 11:21:24 -0600
+Subject: [PATCH 0/5] *** SUBJECT HERE ***
+
+*** BLURB HERE ***
+
+Bharath Vedartham (5):
+  mm: Add logic to calculate compaction rate and reclaim rate
+  mm/compaction.c: Calculate compaction rate
+  mm/vmscan.c: Add pgdat parameter to trend_analysis functions
+  mm/vmscan.c: Calculate reclaim_rate
+  mm/lsq.c: Add reclaim rate based prediction in lsq.c
+
+ include/linux/mmzone.h | 67 +++++++++++++++++++++++++++++++++++++++++-
+ mm/compaction.c        | 13 ++++++++
+ mm/lsq.c               | 54 +++++++++++++++++++++-------------
+ mm/vmscan.c            | 14 +++++++--
+ 4 files changed, 123 insertions(+), 25 deletions(-)
+
+-- 
+2.17.1
+
