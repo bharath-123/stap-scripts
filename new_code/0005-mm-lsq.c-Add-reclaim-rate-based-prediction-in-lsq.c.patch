@@ -1,0 +1,109 @@
+From 854ad04f20c848c3388489df655e89d8550f996f Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 29 Aug 2019 11:02:23 -0600
+Subject: [PATCH 5/5] mm/lsq.c: Add reclaim rate based prediction in lsq.c
+
+Here, we take advantage of reclaim rate added in
+previous patches to better enhance proactive memory reclaim.
+
+Firstly, escape mem_predict to reclaim when frag_vec[0].free_pages(the
+total free pages) is lesser than high watermark for kswapd.
+
+When the slope of the memory trend line is decreasing, we calculate the
+time when the amount of memory reaches the high watermark. We then
+calculate the time taken to reclaim frag_vec[0].free_page -
+high_wmark_pages(zone) using the reclaim_rate.
+
+If the time taken to reclaim is greater than the time to reach the high
+watermark then we must let kswapd run again.
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ mm/lsq.c | 54 +++++++++++++++++++++++++++++++++---------------------
+ 1 file changed, 33 insertions(+), 21 deletions(-)
+
+diff --git a/mm/lsq.c b/mm/lsq.c
+index 6005a2b2f44d..cd4779a5ab0b 100644
+--- a/mm/lsq.c
++++ b/mm/lsq.c
+@@ -173,7 +173,7 @@ lsq_fit(struct lsq_struct *lsq, unsigned long new_y, u64 new_x,
+  * is a set of bits which represent which condition has been observed -
+  * potential free memory exhaustion, and potential severe fragmentation.
+  */
+-int mem_predict(struct frag_info *frag_vec, struct zone *zone)
++int mem_predict(struct frag_info *frag_vec, struct zone *zone, pg_data_t *pgdat)
+ {
+ 	int order, retval = 0;
+ 	long long m[MAX_ORDER];
+@@ -203,6 +203,11 @@ int mem_predict(struct frag_info *frag_vec, struct zone *zone)
+ 	if (!is_ready)
+ 		return 0;
+ 
++	if (frag_vec[0].free_pages < high_wmark_pages(zone)) {
++		retval |= MEMPREDICT_RECLAIM;
++		return retval;
++	}
++
+ 	/*
+ 	 * Trend line for each order page is available now. If the trend
+ 	 * line for overall free pages is trending upwards (positive
+@@ -244,29 +249,36 @@ int mem_predict(struct frag_info *frag_vec, struct zone *zone)
+ 			}
+ 		}
+ 	} else {
+-		unsigned long threshold;
++		/*
++		 * If the reclaim_rate is 0, i.e we haven't gone through balance_pgdat()
++		 * enough number of times, then fallback to simple threshold based prediction.
++		 */
++		if (!pgdat->reclaim_rate) {
++			if (frag_vec[0].free_pages < MEMRECLAMATION_THRESHOLD * zone_managed_pages(zone) / 100) {
++				retval |= MEMPREDICT_RECLAIM;
++				return retval;	
++			}
++		}
++		
++		/*
++		 * This is the time at which number of pages drop below high_wmark_pages(zone)
++		 */
++		long threshold = (high_wmark_pages(zone) - c[0]) / m[0];
++
++		/*
++		 * Currently there are frag_vec[0].free_pages total pages, Find out the time taken 
++		 * to reclaim frag_vec[0].free_pages - high_wmark_pages(zone).
++		 */
++		long time_to_reclaim = (frag_vec[0].free_pages - high_wmark_pages(zone)) / 
++			pgdat->reclaim_rate;
+ 
+ 		/*
+-		 * Trend line for overall free pages is showing a
+-		 * negative trend. Check if less than threshold
+-		 * pages are free. If so, start reclamation now to stave
+-		 * off memory exhaustion
+-		 *
+-		 * TODO: This is not the best way to use trend analysis.
+-		 * The right way to determine if it is time to start
+-		 * reclamation to avoid memory exhaustion is to compute
+-		 * how far away is exhaustion (least square fit
+-		 * line can provide that) and what is the average rate of
+-		 * memory reclamation. Using those two rates, compute how
+-		 * far in advance of exhaustion should reclamation be
+-		 * started to avoid exhaustion. This can be done after
+-		 * additional code has been added to keep track of current
+-		 * rate of reclamation.
++		 * If the time to reclaim frag_vec[0].free_pages - high_wmark_pages(zone) is greater 
++		 * than the time when number of pages drop below high_wmark_pages, then we need to begin
++		 * proactive reclaim i.e 
+ 		 */
+-		threshold = (zone_managed_pages(zone)*MEMRECLAMATION_THRESHOLD)
+-				/100;
+-		if (frag_vec[0].free_pages < threshold)
+-			retval |= MEMPREDICT_RECLAIM;
++		if (time_to_reclaim > threshold) 
++			retval |= MEMPREDICT_RECLAIM;		
+ 	}
+ 
+ 	return retval;
+-- 
+2.17.1
+

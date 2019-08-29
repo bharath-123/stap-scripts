@@ -1,0 +1,59 @@
+From 573603050890395ac047a5339d6198d5f54ddc9b Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 29 Aug 2019 10:55:57 -0600
+Subject: [PATCH 2/5] mm/compaction.c: Calculate compaction rate
+
+Code is added based off the code in the previous patch to caculate
+compaction rate.
+
+Compaction rate is calculated as the number of pages migrated by
+kcompactd. start and end measure the time taken by the kcompactd to
+finish one compaction cycle. compaction rate is measured as:
+compaction_rate = (pages_migrated) / (end - start)
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ mm/compaction.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/mm/compaction.c b/mm/compaction.c
+index 952dc2fb24e5..f1851b42207f 100644
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -2536,6 +2536,9 @@ static void kcompactd_do_work(pg_data_t *pgdat)
+ 		.ignore_skip_hint = false,
+ 		.gfp_mask = GFP_KERNEL,
+ 	};
++	unsigned long start = get_jiffies_64();
++	unsigned long end;
++	unsigned long migrated_pages = 0;
+ 	trace_mm_compaction_kcompactd_wake(pgdat->node_id, cc.order,
+ 							cc.classzone_idx);
+ 	count_compact_event(KCOMPACTD_WAKE);
+@@ -2589,6 +2592,8 @@ static void kcompactd_do_work(pg_data_t *pgdat)
+ 		count_compact_events(KCOMPACTD_FREE_SCANNED,
+ 				     cc.total_free_scanned);
+ 
++		migrated_pages += cc.total_migrate_scanned;
++
+ 		VM_BUG_ON(!list_empty(&cc.freepages));
+ 		VM_BUG_ON(!list_empty(&cc.migratepages));
+ 	}
+@@ -2602,6 +2607,14 @@ static void kcompactd_do_work(pg_data_t *pgdat)
+ 		pgdat->kcompactd_max_order = 0;
+ 	if (pgdat->kcompactd_classzone_idx >= cc.classzone_idx)
+ 		pgdat->kcompactd_classzone_idx = pgdat->nr_zones - 1;
++	
++	end = get_jiffies_64();
++
++	if (start != end && migrated_pages) {
++		unsigned long compaction_rate = migrated_pages / jiffies64_to_msecs(end - start);
++		update_compaction_rate(pgdat, compaction_rate);
++	}
++
+ }
+ 
+ void wakeup_kcompactd(pg_data_t *pgdat, int order, int classzone_idx)
+-- 
+2.17.1
+

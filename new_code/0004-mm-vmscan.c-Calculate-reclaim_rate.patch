@@ -1,0 +1,46 @@
+From 568ac90ba6238f29699c555ba6c9c2f37fa26ef0 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 29 Aug 2019 11:00:45 -0600
+Subject: [PATCH 4/5] mm/vmscan.c: Calculate reclaim_rate
+
+Calculate reclaim_rate similarly to compaction rate. In this case, we
+measure the time taken in balance_pgdat and we calculate the
+reclaim_rate by the following formula:
+
+reclaim_rate = (number of pages reclaimed) / (time taken by
+balance_pgdat())
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ mm/vmscan.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 59a0dc2c1308..2e394ec755ec 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3589,6 +3589,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 		.order = order,
+ 		.may_unmap = 1,
+ 	};
++	unsigned long start = get_jiffies_64();
++	unsigned long end;
+ 
+ 	set_task_reclaim_state(current, &sc.reclaim_state);
+ 	psi_memstall_enter(&pflags);
+@@ -3791,6 +3793,12 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int classzone_idx)
+ 	psi_memstall_leave(&pflags);
+ 	set_task_reclaim_state(current, NULL);
+ 
++	end = get_jiffies_64();
++
++	if (start != end && sc.nr_reclaimed) {
++		unsigned long reclaim_rate = (sc.nr_reclaimed) / jiffies64_to_msecs(end - start);
++		update_reclaim_rate(pgdat, reclaim_rate);
++	}
+ 	/*
+ 	 * Return the order kswapd stopped reclaiming at as
+ 	 * prepare_kswapd_sleep() takes it into account. If another caller
+-- 
+2.17.1
+

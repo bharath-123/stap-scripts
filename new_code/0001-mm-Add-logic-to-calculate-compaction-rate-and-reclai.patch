@@ -1,0 +1,120 @@
+From 7e5116afee67e8ac4579cce736b5ce27cba4dba6 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 29 Aug 2019 10:54:21 -0600
+Subject: [PATCH 1/5] mm: Add logic to calculate compaction rate and reclaim
+ rate
+
+Compaction rate and reclaim rate are calculated by maintaining a window
+of RATE_LOOKBACK values(defined as 8) and calculating the average of
+those windows.
+
+The values for reclaim_rate and compaction_rate are calculated in
+vmscan.c and compaction.c
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ include/linux/mmzone.h | 67 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 66 insertions(+), 1 deletion(-)
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index a523476b5ce1..d3217ce3abeb 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -622,7 +622,7 @@ enum zone_flags {
+ 					 */
+ };
+ 
+-extern int mem_predict(struct frag_info *frag_vec, struct zone *zone);
++extern int mem_predict(struct frag_info *frag_vec, struct zone *zone, struct pglist_data *pgdat);
+ 
+ static inline unsigned long zone_managed_pages(struct zone *zone)
+ {
+@@ -719,6 +719,15 @@ struct zonelist {
+ extern struct page *mem_map;
+ #endif
+ 
++#define RATE_LOOKBACK 8
++
++struct rate_states {
++	unsigned long rate_lookback[RATE_LOOKBACK];
++	bool ready;
++	int next;
++	unsigned long sum;
++};
++
+ /*
+  * On NUMA machines, each NUMA node would have a pg_data_t to describe
+  * it's memory layout. On UMA machines there is a single pglist_data which
+@@ -808,6 +817,12 @@ typedef struct pglist_data {
+ 
+ 	unsigned long		flags;
+ 
++	unsigned long		reclaim_rate;
++	unsigned long		compaction_rate;
++
++	struct rate_states	reclaim_states;
++	struct rate_states	compaction_states;
++
+ 	ZONE_PADDING(_pad2_)
+ 
+ 	/* Per-node vmstats */
+@@ -827,6 +842,56 @@ typedef struct pglist_data {
+ #define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
+ #define node_end_pfn(nid) pgdat_end_pfn(NODE_DATA(nid))
+ 
++/*
++ * Update the reclaim rate structure and update the reclaim rate.
++ */
++static inline void update_reclaim_rate(struct pglist_data *pgdat, unsigned long reclaim_rate)
++{
++	int next;
++
++	next = pgdat->reclaim_states.next++;	
++	pgdat->reclaim_states.rate_lookback[next] = reclaim_rate;
++	
++	pgdat->reclaim_states.sum += reclaim_rate;
++	
++	if (pgdat->reclaim_states.next == RATE_LOOKBACK) {
++		pgdat->reclaim_states.next = 0;
++		pgdat->reclaim_states.ready = true;
++	}
++
++	if (!pgdat->reclaim_states.ready) 
++		return ;
++
++	pgdat->reclaim_rate = pgdat->reclaim_states.sum / RATE_LOOKBACK;
++
++	pgdat->reclaim_states.sum -= (pgdat->reclaim_states.rate_lookback[pgdat->reclaim_states.next]);
++}
++
++/*
++ * Update the compaction rate structure and update the compaction rate
++ */
++static inline void update_compaction_rate(struct pglist_data *pgdat, unsigned long compaction_rate)
++{
++	int next;
++
++	next = pgdat->compaction_states.next++;
++	pgdat->compaction_states.rate_lookback[next] = compaction_rate;
++
++	pgdat->compaction_states.sum += compaction_rate;
++	
++	if (pgdat->compaction_states.next == RATE_LOOKBACK) {
++		pgdat->compaction_states.next = 0;
++		pgdat->compaction_states.ready = true;
++	}
++
++	if (!pgdat->compaction_states.ready) 
++		return ;
++
++	pgdat->compaction_rate = pgdat->compaction_states.sum / RATE_LOOKBACK;
++
++	pgdat->compaction_states.sum -= (pgdat->compaction_states.rate_lookback[pgdat->compaction_states.next]);
++}
++
+ static inline struct lruvec *node_lruvec(struct pglist_data *pgdat)
+ {
+ 	return &pgdat->lruvec;
+-- 
+2.17.1
+

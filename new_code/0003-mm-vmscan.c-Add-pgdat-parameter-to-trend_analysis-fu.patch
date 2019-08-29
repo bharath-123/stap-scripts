@@ -1,0 +1,48 @@
+From ed02e11881de140c71edd820d20ecd19f085b718 Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Thu, 29 Aug 2019 10:58:17 -0600
+Subject: [PATCH 3/5] mm/vmscan.c: Add pgdat parameter to trend_analysis
+ functions
+
+Add the parameter pgdat in trend_analysis function to access the
+reclaim_rate and compaction_rate in the least squares code.
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ mm/vmscan.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index ab6469621850..59a0dc2c1308 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3401,7 +3401,7 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
+  * Update  trend data and perform trend analysis for a zone to foresee
+  * a low memory or severe fragmentation event
+  */
+-static int zone_trend_analysis(struct zone *zone)
++static int zone_trend_analysis(struct zone *zone, pg_data_t *pgdat)
+ {
+ 	struct frag_info frag_vec[MAX_ORDER];
+ 	int order, result;
+@@ -3424,7 +3424,7 @@ static int zone_trend_analysis(struct zone *zone)
+ 	frag_vec[0].free_pages = total_free_pages;
+ 	frag_vec[0].time = frag_vec[MAX_ORDER - 1].time;
+ 
+-	result = mem_predict(frag_vec, zone);
++	result = mem_predict(frag_vec, zone, pgdat);
+ 
+ 	return result;
+ }
+@@ -3450,7 +3450,7 @@ static int node_trend_analysis(pg_data_t *pgdat, int classzone_idx)
+ 		 * Check if trend analysis shows potential fragmentation
+ 		 * in near future
+ 		 */
+-		zoneval = zone_trend_analysis(zone);
++		zoneval = zone_trend_analysis(zone, pgdat);
+ 		if (zoneval & MEMPREDICT_COMPACT)
+ 			set_bit(ZONE_POTENTIAL_FRAG, &zone->flags);
+ 		if (zoneval & MEMPREDICT_RECLAIM)
+-- 
+2.17.1
+
