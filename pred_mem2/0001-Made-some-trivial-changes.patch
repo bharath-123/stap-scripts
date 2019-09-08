@@ -1,0 +1,181 @@
+From 094904af8414ec11ebfced3f7d8488053624839d Mon Sep 17 00:00:00 2001
+From: Bharath Vedartham <linux.bhar@gmail.com>
+Date: Sun, 8 Sep 2019 20:47:36 +0530
+Subject: [PATCH] Made some trivial changes
+
+Signed-off-by: Bharath Vedartham <linux.bhar@gmail.com>
+---
+ predict.c    | 11 +++++------
+ predict.h    |  4 ++--
+ predictord.c | 37 ++++++++++++++++++++++++-------------
+ 3 files changed, 31 insertions(+), 21 deletions(-)
+
+diff --git a/predict.c b/predict.c
+index df31f11..98a1e91 100644
+--- a/predict.c
++++ b/predict.c
+@@ -3,7 +3,7 @@
+ #include <stdlib.h>
+ #include "predict_impl.h"
+ 
+-unsigned long mempredict_threshold = 1000;
++long mempredict_threshold = 1000;
+ 
+ #define MEMRECLAIM_THRESHOLD 20
+ 
+@@ -106,7 +106,7 @@ lsq_fit(struct lsq_struct *lsq, long long new_y, long long new_x,
+  * after the completion of an entire compaction pass].
+  */
+ unsigned long
+-predict(struct frag_info *frag_vec, struct lsq_struct *lsq, int threshold, int R_c,
++predict(struct frag_info *frag_vec, struct lsq_struct *lsq, 
+ 	struct zone_hash_entry *zhe, unsigned long *scale_wmark)
+ {
+ 	int order;
+@@ -134,7 +134,7 @@ predict(struct frag_info *frag_vec, struct lsq_struct *lsq, int threshold, int R
+ 			if (m[0] == m[order])
+ 				continue;
+ 
+-			long long x_cross = ((c[0] - c[order]) * 100) / (m[order] - m[0]);
++			long x_cross = ((c[0] - c[order]) * 100) / (m[order] - m[0]);
+ 
+ 			if ((x_cross < mempredict_threshold) && (x_cross > -mempredict_threshold)) {
+ 				retval |= MEMPREDICT_COMPACT;
+@@ -146,12 +146,12 @@ predict(struct frag_info *frag_vec, struct lsq_struct *lsq, int threshold, int R
+ 		/*
+ 		 * Time taken to go below high_wmark.
+ 		 */
+-		unsigned long time_taken = (zhe->high - c[0]) / m[0];
++		long time_taken = abs((zhe->high - c[0]) / m[0]);
+ 
+ 		/*
+ 		 * Time to reclaim frag_vec[0].free_pages - zhe->high
+ 		 */
+-		unsigned long time_to_reclaim = (frag_vec[0].free_pages - zhe->high) / reclaim_rate;
++		long time_to_reclaim = (frag_vec[0].free_pages - zhe->high) / reclaim_rate;
+ 	
+ 		/*
+ 		 * If time taken to go below high_wmark is greater than 
+@@ -162,7 +162,6 @@ predict(struct frag_info *frag_vec, struct lsq_struct *lsq, int threshold, int R
+ 			*scale_wmark = (frag_vec[0].free_pages - zhe->high);
+ 			retval |= MEMPREDICT_RECLAIM;
+ 		}
+-
+ 	}
+ 
+ 	return retval;
+diff --git a/predict.h b/predict.h
+index 01811d2..104d7bb 100644
+--- a/predict.h
++++ b/predict.h
+@@ -49,8 +49,8 @@ struct zone_hash_entry {
+ 	unsigned long managed;
+ };
+ 
+-unsigned long predict(struct frag_info *, struct lsq_struct *, int,
+-    int, struct zone_hash_entry *, unsigned long *);
++unsigned long predict(struct frag_info *, struct lsq_struct *, 
++		struct zone_hash_entry *, unsigned long *);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/predictord.c b/predictord.c
+index e61b79c..b55dc1f 100644
+--- a/predictord.c
++++ b/predictord.c
+@@ -255,13 +255,13 @@ rescale_watermarks(struct zone_hash_entry *zhe,
+ 	}
+ }
+ 
+-unsigned long
++long
+ get_msecs(struct timespec *spec)
+ {
+ 	if (!spec)
+ 		return -1;
+ 
+-	return (unsigned long)((spec->tv_sec * 1000) + (spec->tv_nsec / 1000));
++	return ((spec->tv_sec * 1000) + (spec->tv_nsec / 1000));
+ }
+ 
+ int
+@@ -508,7 +508,7 @@ main(int argc, char **argv)
+ 		 * Keep track of time to calculate the compaction and reclaim rates
+ 		 */
+ 		clock_gettime(CLOCK_REALTIME, &spec_before);
+-		unsigned long reclaim_before = no_pages_reclaimed();
++		long reclaim_before = no_pages_reclaimed();
+ 		
+ 		if (!get_line(ifile, ofile, nodestr, zonetype, nr_free)) {
+ 			if (iflag) {
+@@ -539,7 +539,7 @@ main(int argc, char **argv)
+ 		 */
+ 		total_free = free[0].free_pages = 0;
+ 		for (order = 0; order < MAX_ORDER; order++) {
+-			unsigned long free_pages;
++			long long free_pages;
+ 
+ 			free_pages = nr_free[order] << order;
+ 			total_free += free_pages;
+@@ -547,7 +547,7 @@ main(int argc, char **argv)
+ 				free[order + 1].free_pages =
+ 				    free[order].free_pages + free_pages;
+ 				clock_gettime(CLOCK_REALTIME, &spec);
+-				free[order + 1].msecs = (long long)get_msecs(&spec);
++				free[order + 1].msecs = get_msecs(&spec);
+ 			}
+ 		}
+ 		free[0].free_pages = total_free;
+@@ -556,8 +556,7 @@ main(int argc, char **argv)
+ 		 * Offer the predictor the fragmented free memory vector but
+ 		 * do nothing else unless it issues a prediction.
+ 		 */
+-		result = predict(free, zhe->z_lsq, threshold, rate,
+-			zhe, &scale_wmark);
++		result = predict(free, zhe->z_lsq, zhe, &scale_wmark);
+ 		//plot(zhe, free, result);
+ 	
+ 		if (!get_line(ifile, ofile, nodestr, zonetype, nr_free_after)) {
+@@ -586,21 +585,33 @@ main(int argc, char **argv)
+ 				compacted_pages += curr_compacted_pages;
+ 		}
+ 
+-		unsigned long reclaim_after = no_pages_reclaimed();
+-		compaction_rate = compacted_pages / time_elapsed;
+-		reclaim_rate = (reclaim_after - reclaim_before) / time_elapsed;
+-		printf("compaction rate is %ld\n", compaction_rate);
++		long reclaim_after = no_pages_reclaimed();
++		
++		if (time_elapsed) {
++			compaction_rate = compacted_pages / time_elapsed;
++			long curr_reclaim_rate = (reclaim_after - reclaim_before) / time_elapsed;
++			/*
++			 * pgsteal_kswapd may not change a lot in /proc/vmstat given 
++			 * the time elapsed. So reclaim_rate maybe 0 a lot of times. If we
++			 * already have a reclaim_rate then don't zero it.
++			 */
++			if (reclaim_rate && !curr_reclaim_rate) 
++				reclaim_rate = curr_reclaim_rate;
++		
+ 
++		}
+ 		if (result == 0)
+ 			continue;
+ 	
+-		
++		/*
++		 * If we need to reclaim, then rescale the watermarks to 
++		 * make kswapd more aggresive. 
++		 */	
+ 		if (result & MEMPREDICT_RECLAIM && scale_wmark > 0) {
+ 			rescale_watermarks(zhe, scale_wmark);
+ 		}
+ 		
+ 		/* Wake the compactor if requested. */
+-		
+ 		if (result & MEMPREDICT_COMPACT) {
+ 			if (!Cflag)
+ 				continue;
+-- 
+2.7.4
+
